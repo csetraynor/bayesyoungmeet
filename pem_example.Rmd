@@ -1,0 +1,478 @@
+---
+title: "An example of the piecewise exponential model (PEM)"
+author : Carlos S Traynor
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      fig.width = 6,
+                      fig.height = 6)
+```
+
+```{r message = FALSE, warning = FALSE}
+library(purrr)
+library(httr)
+library(readr)
+library(survival)
+library(rstan)
+library(spBayesSurv)
+library(pracma)
+library(assertthat)
+library(cgdsr)
+suppressMessages(library(dplyr))
+library(ggplot2)
+require(ggfortify)
+theme_set(theme_bw())
+library(VIM)
+```
+
+## Introduction
+
+Survival analysis is the art of modelling the time until a certain event may occur. The peculariaty about Survival is that not all events are observsed. Thus, the inference about the outcome can not used clasical statistical methods. 
+
+The most common example of survival models is the Cox model, which assumes leaves the baseline hazard unspecified. However, many parametric models estimate the baseline hazard. A drawback of the parametric approach is that the strong assumptions in the form of the baseline might jeopardise the model performance. The piecewise exponential model (PEM) can be seen as a compromise between parametric and semiparametric models, which has a relaxed assumption in the baseline hazard assumption.
+
+## Outline
+
+In this example we will go over again some points already seen in the vignette Applied Survival Models by Jacqueline Buros, before touching the example of the piecewise exponential model. If you have not already read her vignete, you could do asap because you will find many interesting explanations that we might go over quicly. It is also possible to skip the section data cleaning if the vignette has been read.
+
+We will cover the following:
+
+-Download data from TCGA
+-Review PEM model.
+-Test PEM model against simulated data.
+-Fit NULL PEM model with TCGA data.
+-Check convergence and review posterior predictive check on model.
+
+## Download data
+
+To illustrate the PEM model we will use a datset from The Cancer Genome Atlas (TCGA) in  glioblastome. Glioblastome was the first cancer to be extensively studied by TCGA in this paper from 2008. In 2013, the TCGA published a second paper on TCGA including measurments of new biomarkers. This data is available from the cBioPortal and can be downloaded using the cgdsr package, we will also convert directly the dataset to a manipulable dataframe.
+
+```{r download data}
+mycgds = CGDS("http://www.cbioportal.org/public-portal/")
+study_list = getCancerStudies(mycgds)
+id_sutdy = getCancerStudies(mycgds)[55,1]
+case_list = getCaseLists(mycgds, id_sutdy)[2,1]
+clinical_data <-  tbl_df(getClinicalData(mycgds, case_list)) 
+```
+
+In addition, the new publication have a  pooled population of the previous and current cohorts. This, is a case of historical data, where in a frequentist approach usually the pooling is prefer but in a Bayesian framework a power prior using the 2008 cohort as a historical data may be considered. For now, we will just consider the pooled cohort. We can inspect the dataframe:
+
+```{r inspect dataframe}
+glimpse(clinical_data)
+```
+
+##Data Cleaning
+
+First we will consider to obtain a slightly better manipulable dataset. For example, these steps will convert the rownames to a new colunm id_sample, following the tidy dataset canons, the column names into lower case, and the "" into NA.
+
+```{r data cleaning}
+#
+clinical_data <- clinical_data %>% tibble::rownames_to_column("sample_id") 
+names(clinical_data) <- tolower(names(clinical_data)) 
+#convert missig values into NA
+convert_blank_to_na <- function(x) {
+  if(!purrr::is_character(x)){
+    warning('input variate not character - return original')
+    return(x)
+  } else {
+    ifelse(x == '', NA, x)
+  }
+}
+clinical_data <- clinical_data %>%
+  dplyr::mutate_all(funs(convert_blank_to_na))
+```
+
+Now we can inspect easily the missing data, for example we can plot different combinations of missing values for each covariate using the function aggr form the package VIM.
+```{r VIM plot}
+clinical_data %>%
+  VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
+```
+
+Let's consider the overall survival as the response variable. The variable os_months indicated the observed time in mohts, while the variable os_status is a censoring indicator of the observed time being an event or a censored observation. Then given a set of covariates the variables os_status and os_months define the survival outcome. 
+
+## Missing survival times
+
+It is not strange that appart of the censored observation to find in a dataset missing, NA, observed time values or censoring indicator. Just for now we will discard these observations.
+
+```{r inspect missing data}
+clinical_data %>% 
+  filter(is.na(os_status) | os_status == "") %>%
+  select(os_months, os_status) %>%
+  glimpse
+```
+
+We have 44 observations where os_status is NA, if we look also at observations where we have missing survival times we will find the same observations:
+
+```{r inspect survival time NA}
+clinical_data %>% 
+  filter(is.na(os_status) | os_status == "" |os_months < 0 | is.na(os_months)) %>%
+  select(os_months, os_status) %>%
+  glimpse
+```
+
+Now we will remove these observations and assert that in fact we have 44 observations less. 
+```{r remove and assert}
+short_clin_dat <- 
+  clinical_data %>% 
+  filter(!is.na(os_status) & os_status != "" )
+
+#confirm 44 fewer observations
+assertthat::assert_that(nrow(short_clin_dat) == (nrow(clinical_data) - 44))
+clinical_data <- tbl_df(short_clin_dat)
+remove(short_clin_dat)
+```
+If we observe again the missing value plot, we will also see that all missing values from os_status and os_months, and also we have fewer missing values for the other variables, it is the case that the individuals that have been removed had many missing covariate values.
+```{r plot na again}
+clinical_data %>%
+  VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
+```
+
+It is a good practice in survival analysis to arrange the dataset by observed survival times.
+
+```{r arrange dataset}
+clinical_data <- clinical_data %>%
+  arrange(os_months)
+```
+
+##Distribution of event times
+
+Using the observed times, os_months, we can plot the distribution of times stratifying between censored and events, this will be helpful to understand the dataset, and to check our model in following steps. 
+
+```{r plot time distribution, echo=FALSE}
+clinical_data %>%
+  ggplot(aes(x = os_months,
+             group = os_status,
+             colour = os_status,
+             fill = os_status)) +
+  geom_density(alpha = 0.5)
+```
+
+The KM curve is a non parametric survival estimate, which corresponds to the maximum likelihood solution of the product limit estimate including censored observations:
+
+```{r KM curve, echo = FALSE}
+mle.surv <- survfit(Surv(os_months, os_deceased) ~ 1,
+                    data = clinical_data %>%
+                      mutate(os_deceased = (os_status == "DECEASED")))
+require(ggfortify)
+ggplot2::autoplot(mle.surv, conf.int = F) +
+  ggtitle('KM survival for GGM 2008 Cohort')
+```
+
+## Piecewise Exponential Model (PEM)
+
+The construct the PEM, partition the time in the following intervals:
+
+0 < \tau_{1} < \tau_{2} < ... < \tau_{J}
+
+whit \tau_{j} > \y_{i} for all i= 1,2,...,n.  example, let the partition interval br tau = { 20 40 60 80}, further let take the ratio of the baseline hazard for each interval to respect the first baseline = (1 1.1 0.8 0.6 0.2) , we can visualise this partition as: 
+
+```{r KM curve, echo = FALSE}
+y0 <- c(1,1.1,0.8,0.6, 0.2)
+sfun  <- stepfun(seq(20, 80, by = 20), y0, f = 0)
+plot(sfun,  main = "Step function of PEM", xlab = "time (months)", ylab = "baseline hazard ratio", ylim= c(0, 1.2))
+```
+
+We can think of it as two first periods where individuals have a high rate of failure, while the survivors at 20 months have a better chance to avoid an event.
+
+The stan code for the model can be found in the biostan package:
+
+```{r stan model}
+stanfile <- "pem_clinical_model.stan"
+biostan::print_stan_file(stan_file)
+#or open stan file
+if (interactive())
+  file.edit(stanfile)
+```
+
+##Testing the model on simulated data
+
+We will now simulate exponentially correlated data to test the model.
+The function to simulate the data is based on the article by [Rainer Walke] (http://www.demogr.mpg.de/papers/technicalreports/tr-2010-003.pdf), however we will do slight modifications on the censoring rate. As proposed by Jacqueline Buros, the censoring rate must be independent of the hazard. This as a usual assumption of the proportional hazard model. Moreover, if this assumptions is not tenable a different model must be considered, for example the competing risk model.
+
+First, we will illustrate the simulation of 100 individuals, where x is the covariate values and beta the regression coefficients.
+
+```{r simulate data}
+n = 100
+X <- matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
+beta <- c(1.5,2)
+```
+
+Hence, the prognostic index mu for each individual is given by:
+```{r simulate data}
+mu = exp (X %*% beta )
+```
+
+Further lets consider the partition of the time axis tau, and the baseline hazard lambda at each interval.
+
+```{r simulate data}
+lambda = exp(-2.9)* c(1, 0.8, 0.2, 0.25, 0.125); tau = c(0, 10, 15, 30, 50, 100)
+```
+
+The relative hazard at each interval is computed by:
+```{r simulate data}
+#extract first interval baseline hazard
+lambda0 <- lambda[1]
+#compute relative baseline hazard for each interval respect to the first
+rel_base_risk <- lambda/lambda0
+rel_risk = lapply(mu, "*" , rel_base_risk)
+```
+
+Then we need to calculate the duration of the intervals, create a helping matrix to calculate the hazard at each interval , and draw a uniform random variable S ~ (0,1), S = 1 - F.
+
+```{r}
+  #caculate duration
+  dt = diff(tau)
+  #create a helping matrix
+  LD <- matrix(0, nrow = length(tau), ncol = length(rel_base_risk)); LD[lower.tri(LD)] <- 1;
+  #compute log survival
+  logsurv <- log(1-runif(n))
+```
+
+Next step is to determine the right interval and compute the survival time.
+
+```{r}
+#compute log survival for each interval tau
+lsm = lapply(rel_risk, function(x) -lambda0 * as.vector(LD %*% (x*dt)))
+t <- (rep(NA,100))
+#find appropiate time interval
+t = mapply(function(x, y, z) {
+  for (i in 1:length(lambda)) {
+    t = ifelse(x[i]>=z & z>x[i+1], tau[i] + (x[i] - z)/lambda0/y[i], t)
+  }
+  return(t)
+} , x = lsm, y = rel_risk , z = as.list(logsurv)
+)
+```
+
+Following the paper by [Rainer Walke] (http://www.demogr.mpg.de/papers/technicalreports/tr-2010-003.pdf) we use an auxilliary matrix to compute the recurrence relation between the succesive intervals in the survival expectancy. The rationale is that the cumulative hazard, and thus the survival are given by the previous interval at each time point.
+
+We could wrap the simulate PEM survival times with the following function, where n is the number of individuals to simulate, tau is the tau interval partitions of the time axis and bh is the estimated baseline hazard for each interval.
+
+```{r PEM model simulation}
+pem_sim_data <- function(n, tau, estimates, X){
+  
+  beta <- estimates[[2]]
+  lambda <- estimates[[1]]
+  
+  #prognostic index
+  mu = exp (X[,1:2] %*% beta )
+  #extract first interval baseline hazard
+  lambda0 <- lambda[1]
+  #compute relative hazard for each interval respect to the first
+  rel_base_risk <- lambda/lambda0
+  rel_risk = lapply(mu, "*" , rel_base_risk)
+  #caculate duration
+  dt = c(diff(tau))
+  assertthat::assert_that(length(dt) == length(lambda))
+  #create a helping matrix
+  LD <- matrix(0, nrow = length(tau), ncol = length(rel_base_risk))
+  LD[lower.tri(LD)] <- 1;
+  #compute log survival
+  logsurv <- log(1-runif(n))
+  #compute log survival for each interval tau
+  lsm = lapply(rel_risk, function(x) -lambda0 * as.vector(LD %*% (x*dt)))
+  t <- (rep(NA,100))
+  #find appropiate time interval
+  t = mapply(function(x, y, z) {
+    for (i in seq_along(lambda)) {
+      t = ifelse(x[i]>=z & z>x[i+1], tau[i] + (x[i] - z)/lambda0/y[i], t)
+    }
+    return(t)
+  } , x = lsm, y = rel_risk , z = as.list(logsurv)
+  )
+  
+  sim.data <- data_frame(surv_months = t) %>%
+    mutate(os_status = ifelse(is.na(surv_months), 'LIVING', 'DECEASED'),
+           surv_months = ifelse(is.na(surv_months), tau[length(tau)], surv_months),
+           id = seq(n), 
+           censor_months = rexp(n = n, rate = 1/100))%>%
+    dplyr::mutate(os_status = ifelse(surv_months < censor_months & os_status != 'LIVING',
+                                     'DECEASED', 'LIVING'
+    ),
+    os_months = ifelse(surv_months < censor_months  & os_status != 'LIVING',
+                       surv_months, censor_months
+    )
+    ) %>%   cbind(X) %>%
+    rename("continuos" = "1", "discrete" = "2")
+  
+  return(sim.data)
+}
+```
+
+
+Note also that we pick a censoring rate using rexp(), although other rates could be used, in general the censoring is a nuissance parameter, and a distribution that does not depend to the survival outcome may be valid.
+
+Now we can simulate a dataset similar to the dataset from TCGA.
+```{r simulate data}
+set.seed(342)
+test_n = 100
+tau = c(seq(0, 300, by = 90), seq(300, 900, 100))
+test_estimates <- list(baseline = exp(-3)*rev(seq(0.1,1, by = 0.1)), beta = c(10,-3))
+sim_data <-  pem_sim_data(n = test_n, estimates = test_estimates, tau = tau, X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2))
+```
+
+
+Plot the simulated data, that looks like this:
+```{r plot time distribution, echo=TRUE}
+## plot KM curve from simulated data
+sim_data <- 
+    sim_data %>%
+    dplyr::mutate(os_deceased = os_status == 'DECEASED')
+
+autoplot(survival::survfit(Surv(os_months, os_deceased) ~ 1,
+                      data = sim_data
+                      ), conf.int = F) + 
+    ggtitle('Simulated KM curve')
+```
+
+The next step is to fit the simulated data to the stan model, but first it is needed to convert the dataset into long data format, this is usually requested for fitting PEM, the new dataset will have one observation for each individual and time point. This function will be also useful when fiting the actual dataset. 
+
+```{r format long data}
+#order the dataset by observed times
+sim_data <- sim_data %>% 
+  arrange(os_months)
+#set the tau interval times
+tau <- sim_data %>% 
+  filter(os_status == "DECEASED") %>%
+  select(os_months) %>% 
+  unlist() %>%
+  sort()
+
+ 
+longdata <- survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
+                                cut = tau, data = (sim_data %>%
+                                                       mutate(deceased = os_status == "DECEASED"))) %>%
+  arrange(id, os_months)
+#create time point id
+longdata <- longdata %>%
+    group_by(id) %>%
+    mutate(t = seq(n())) 
+```
+
+The last step allows for the creation of a time point id for each individual, then in the stan model will be used to assert at which interval belongs the observation, lets have a look at the dataset:
+
+```{r long data}
+View(longdata)
+```
+
+We can wrap in a function the generation of data for stan which will be handie when running more than one iteration.
+
+```{r function list data}
+gen_stan_data <- function(data){
+  stan_data <- list(
+    N = nrow(data),
+    S = dplyr::n_distinct(data$id),
+    "T" = dplyr::n_distinct(data$t),
+    s = array(as.numeric(data$id)),
+    t = data$t,
+    M=2,
+    event = data$deceased,
+    obs_t = data$os_months,
+    x = array(matrix(c(data$continuos, data$discrete), ncol=2), dim=c(nrow(data), 2))
+  )
+}
+```
+
+#test simulated values with stan
+
+Now we can run stan:
+
+
+```{r run stan model , echo=FALSE}
+stanfile <- 'pem_survival_model.stan'
+rstan_options(auto_write = TRUE)
+simulated_fit <- stan(stanfile,
+                            data = gen_stan_data(longdata),
+                            iter = 1000,
+                            cores = min(4, parallel::detectCores()),
+                            seed = 7327,
+                            chains = 4
+)
+```
+```{r}
+print(simulated_fit)
+```
+
+We can observe that the ou
+##Convergence review
+```{r}
+rstan::traceplot(simulated_fit, 'lp__')
+```
+
+```{r}
+rstan::traceplot(simulated_fit, 'beta')
+```
+
+
+##Review posterior distribution of parameters
+
+```{r}
+pp_beta1 <- rstan::extract(simulated_fit,'beta[1]')$beta
+pp_beta2 <- rstan::extract(simulated_fit,'beta[2]')$beta
+
+ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) + 
+    geom_density(aes(x = beta1)) + 
+    geom_vline(aes(xintercept = 10), colour = 'red') +
+    ggtitle('Posterior distribution of beta1\nshowing true value in red')
+```
+
+
+```{r}
+pp_beta1 <- rstan::extract(simulated_fit,'beta[1]')$beta
+pp_beta2 <- rstan::extract(simulated_fit,'beta[2]')$beta
+
+ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) + 
+    geom_density(aes(x = beta2)) + 
+    geom_vline(aes(xintercept = -3), colour = 'red') +
+    ggtitle('Posterior distribution of beta 2\nshowing true value in red')
+```
+
+##Posterior predictive checks
+
+```{r}
+pp_beta <- rstan::extract(simulated_fit,pars = 'beta', permuted = TRUE)
+pp_lambda <- rstan::extract(simulated_fit,pars = 'baseline', permuted = TRUE)
+
+pp_estimates <- list(pp_lambda, pp_beta)
+ 
+tau = unique(sim_data$os_months)
+
+set.seed(342)
+test_n = 100
+X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
+
+pp_newdata <- 
+  purrr::pmap(.l = pp_estimates,
+              .f = ~ pem_sim_data(estimates = .l, 
+                                      tau = tau,
+                                      n = test_n,
+                                      X = X
+              )
+  )
+
+```
+
+
+
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r }
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
