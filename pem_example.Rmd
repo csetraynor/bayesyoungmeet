@@ -253,13 +253,15 @@ Following the paper by [Rainer Walke] (http://www.demogr.mpg.de/papers/technical
 We could wrap the simulate PEM survival times with the following function, where n is the number of individuals to simulate, tau is the tau interval partitions of the time axis and bh is the estimated baseline hazard for each interval.
 
 ```{r PEM model simulation}
-pem_sim_data <- function(n, tau, estimates, X){
+pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   
-  beta <- estimates[[2]]
-  lambda <- estimates[[1]]
+  #format check
+  beta <- as.vector(as.numeric(beta))
+  lambda<- as.vector(as.numeric(lambda))
+  X <- as.matrix(as.numeric(X))
   
   #prognostic index
-  mu = exp (X[,1:2] %*% beta )
+  mu = exp (X %*% beta )
   #extract first interval baseline hazard
   lambda0 <- lambda[1]
   #compute relative hazard for each interval respect to the first
@@ -310,9 +312,15 @@ Now we can simulate a dataset similar to the dataset from TCGA.
 ```{r simulate data}
 set.seed(342)
 test_n = 100
-tau = c(seq(0, 300, by = 90), seq(300, 900, 100))
-test_estimates <- list(baseline = exp(-3)*rev(seq(0.1,1, by = 0.1)), beta = c(10,-3))
-sim_data <-  pem_sim_data(n = test_n, estimates = test_estimates, tau = tau, X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2))
+tau = c(seq(0, 300, by = 90), seq(300, 900, by = 100))
+test_baseline <- exp(-3)*rev(seq(0.1,1, by = 0.1))
+X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
+sim_data <-  pem_sim_data(n = test_n, 
+                          beta = c(10,-3),
+                          lambda = exp(-3)*rev(seq(0.1,1, by = 0.1)),
+                          tau = tau, 
+                          X = X
+)
 ```
 
 
@@ -377,7 +385,6 @@ gen_stan_data <- function(data){
 }
 ```
 
-#test simulated values with stan
 
 Now we can run stan:
 
@@ -393,12 +400,13 @@ simulated_fit <- stan(stanfile,
                             chains = 4
 )
 ```
+
+##Convergence review
+
 ```{r}
 print(simulated_fit)
 ```
 
-We can observe that the ou
-##Convergence review
 ```{r}
 rstan::traceplot(simulated_fit, 'lp__')
 ```
@@ -407,6 +415,10 @@ rstan::traceplot(simulated_fit, 'lp__')
 rstan::traceplot(simulated_fit, 'beta')
 ```
 
+We can observe that there are some convergences problems, a first step is to add initial estimates:
+```{r}
+
+```
 
 ##Review posterior distribution of parameters
 
@@ -422,8 +434,6 @@ ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) +
 
 
 ```{r}
-pp_beta1 <- rstan::extract(simulated_fit,'beta[1]')$beta
-pp_beta2 <- rstan::extract(simulated_fit,'beta[2]')$beta
 
 ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) + 
     geom_density(aes(x = beta2)) + 
@@ -433,29 +443,88 @@ ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) +
 
 ##Posterior predictive checks
 
+
 ```{r}
-pp_beta <- rstan::extract(simulated_fit,pars = 'beta', permuted = TRUE)
-pp_lambda <- rstan::extract(simulated_fit,pars = 'baseline', permuted = TRUE)
+pp_beta <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'beta', permuted = TRUE)$beta) 
+pp_lambda <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'baseline', permuted = TRUE)$baseline)
 
-pp_estimates <- list(pp_lambda, pp_beta)
- 
-tau = unique(sim_data$os_months)
-
-set.seed(342)
-test_n = 100
-X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
+# create list
+pp_beta <-  split(pp_beta, seq(nrow(pp_beta)))
+pp_lambda <-  split(pp_lambda, seq(nrow(pp_lambda)))
 
 pp_newdata <- 
-  purrr::pmap(.l = pp_estimates,
-              .f = ~ pem_sim_data(estimates = .l, 
-                                      tau = tau,
-                                      n = test_n,
-                                      X = X
-              )
-  )
+  purrr::pmap(list(pp_lambda, pp_beta),
+              function(a,b) {pem_sim_data(lambda = a, 
+                                          beta = b,
+                                          tau = tau,
+                                          n = test_n,
+                                          X = X)
+                } )
 
 ```
 
+```{r}
+## ----sim-pp-survdata-----------------------------------------------------
+## cumulative survival rate for each posterior draw
+pp_survdata <-
+  pp_newdata %>%
+  purrr::map(~ dplyr::mutate(., os_deceased = os_status == 'DECEASED')) %>%
+  purrr::map(~ survival::survfit(Surv(os_months, os_deceased) ~ 1, data = .)) %>%
+  purrr::map(fortify)
+```
+
+```{r}
+## summarize cum survival for each unit time (month), summarized at 95% confidence interval
+pp_survdata_agg <- 
+  pp_survdata %>%
+  purrr::map(~ dplyr::mutate(., time_group = floor(time))) %>%
+  dplyr::bind_rows() %>%
+  dplyr::group_by(time_group) %>%
+  dplyr::summarize(surv_mean = mean(surv)
+                   , surv_p50 = median(surv)
+                   , surv_lower = quantile(surv, probs = 0.025)
+                   , surv_upper = quantile(surv, probs = 0.975)
+  ) %>%
+  dplyr::ungroup()
+``` 
+
+```{r}
+## summarize cum survival for each unit time (month), summarized at 95% confidence interval
+pp_survdata_agg <- 
+  pp_survdata %>%
+  purrr::map(~ dplyr::mutate(., time_group = floor(time))) %>%
+  dplyr::bind_rows() %>%
+  dplyr::group_by(time_group) %>%
+  dplyr::summarize(surv_mean = mean(surv)
+                   , surv_p50 = median(surv)
+                   , surv_lower = quantile(surv, probs = 0.025)
+                   , surv_upper = quantile(surv, probs = 0.975)
+  ) %>%
+  dplyr::ungroup()
+```
+
+
+```{r }
+## ----sim-plot-ppcheck----------------------------------------------------
+## km-curve for test data 
+test_data_kmcurve <- 
+  fortify(
+    survival::survfit(
+      Surv(os_months, os_deceased) ~ 1, 
+      data = sim_data %>% 
+        dplyr::mutate(os_deceased = os_status == 'DECEASED')
+    )) %>%
+  dplyr::mutate(lower = surv, upper = surv)
+
+ggplot(pp_survdata_agg %>%
+         dplyr::mutate(type = 'posterior predicted values') %>%
+         dplyr::rename(surv = surv_p50, lower = surv_lower, upper = surv_upper, time = time_group) %>%
+         bind_rows(test_data_kmcurve %>% dplyr::mutate(type = 'actual data')),
+       aes(x = time, group = type, linetype = type)) + 
+  geom_line(aes(y = surv, colour = type)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2) +
+  xlim(c(0, 200))
+```
 
 
 
