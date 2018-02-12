@@ -313,7 +313,7 @@ Now we can simulate a dataset similar to the dataset from TCGA.
 set.seed(342)
 test_n = 100
 tau = c(seq(0, 300, by = 90), seq(300, 900, by = 100))
-test_baseline <- exp(-3)*rev(seq(0.1,1, by = 0.1))
+test_baseline <- exp(-3)*rev(seq(0.1, 1, by = 0.1))
 X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
 sim_data <-  pem_sim_data(n = test_n, 
                           beta = c(10,-3),
