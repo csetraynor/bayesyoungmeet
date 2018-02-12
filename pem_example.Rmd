@@ -258,7 +258,7 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   #format check
   beta <- as.vector(as.numeric(beta))
   lambda<- as.vector(as.numeric(lambda))
-  X <- as.matrix(as.numeric(X))
+  X <- array(matrix(as.numeric(X)), dim = c(n, length(beta)))
   
   #prognostic index
   mu = exp (X %*% beta )
@@ -268,7 +268,11 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   rel_base_risk <- lambda/lambda0
   rel_risk = lapply(mu, "*" , rel_base_risk)
   #caculate duration
-  dt = c(diff(tau))
+  if(tau[1] == 0){
+      dt <- diff(c(tau, 12*10^3)) #In months
+  } else {
+      dt <- diff(c(0, tau, 12*10^3))
+  }
   assertthat::assert_that(length(dt) == length(lambda))
   #create a helping matrix
   LD <- matrix(0, nrow = length(tau), ncol = length(rel_base_risk))
@@ -277,7 +281,7 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   logsurv <- log(1-runif(n))
   #compute log survival for each interval tau
   lsm = lapply(rel_risk, function(x) -lambda0 * as.vector(LD %*% (x*dt)))
-  t <- (rep(NA,100))
+  t <- (rep(NA,n))
   #find appropiate time interval
   t = mapply(function(x, y, z) {
     for (i in seq_along(lambda)) {
@@ -312,14 +316,17 @@ Now we can simulate a dataset similar to the dataset from TCGA.
 ```{r simulate data}
 set.seed(342)
 test_n = 100
-tau = c(seq(0, 300, by = 90), seq(300, 900, by = 100))
-test_baseline <- exp(-3)*rev(seq(0.1, 1, by = 0.1))
+# tau = c(seq(0, 900, length.out = test_n))
+# test_baseline <- exp(-3)*runif(test_n , 0, 1)
+tau = c(seq(0, 300, by = 90), seq(300, 800, by = 100)) #time in months
+test_baseline <- exp(-4)*rev(seq(0.1, 1, by = 0.1))
 X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
-sim_data <-  pem_sim_data(n = test_n, 
-                          beta = c(10,-3),
-                          lambda = exp(-3)*rev(seq(0.1,1, by = 0.1)),
-                          tau = tau, 
-                          X = X
+beta = c(1.5, -2)
+sim_data <-  pem_sim_data( beta = beta,
+                           X = X,
+                           tau = tau,
+                           lambda = test_baseline,
+                           n = test_n
 )
 ```
 
