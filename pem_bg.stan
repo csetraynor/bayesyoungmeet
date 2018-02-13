@@ -4,16 +4,38 @@ N          = total number of observations (length of data)
 S          = number of sample ids
 T          = max timepoint (number of timepoint ids)
 M          = number of covariates
+
 // data
 s          = sample id for each obs
 t          = timepoint id for each obs
 event      = integer indicating if there was an event at time t for sample s
 x          = matrix of real-valued covariates at time t for sample n [N, X]
 obs_t      = observed end time for interval for timepoint for that obs
+
 */
   // Jacqueline Buros Novik <jackinovik@gmail.com>
   
-  data {
+functions {
+  vector sqrt_vec(vector x) {
+    vector[dims(x)[1]] res;
+
+    for (m in 1:dims(x)[1]){
+      res[m] = sqrt(x[m]);
+    }
+
+    return res;
+  }
+
+  vector bg_prior_lp(real r_global, vector r_local) {
+    r_global ~ normal(0.0, 10.0);
+    r_local ~ inv_chi_square(1.0);
+
+    return r_global * sqrt_vec(r_local);
+  }
+}
+
+
+data {
     int<lower=1> N;
     int<lower=1> S;
     int<lower=1> T;
@@ -23,7 +45,7 @@ obs_t      = observed end time for interval for timepoint for that obs
     int<lower=0, upper=1> event[N]; // 1: event, 0:censor
     matrix[N, M] x;                 // explanatory vars
     real<lower=0> obs_t[N];         // observed end time for each obs
-  }
+}
 transformed data {
   real t_dur[T];  // duration for each timepoint
   real t_obs[T];  // observed end time for each timepoint
@@ -49,22 +71,28 @@ transformed data {
 }
 parameters {
   vector<lower=0>[T] baseline; // unstructured baseline hazard for each timepoint t
-  vector[M] beta; // beta for each covariate
+  vector[M] beta_bg_raw; // beta for each covariate
+  real<lower=0> tau_s_bg_raw;
+  vector<lower=0>[M] tau_bg_raw;
 }
 transformed parameters {
   vector<lower=0>[N] hazard;
+  vector[M] beta_bg;
+  
+  beta_bg = bg_prior_lp(tau_s_bg_raw, tau_bg_raw) .* beta_bg_raw;
   
   for (n in 1:N) {
-    hazard[n] = exp(x[n,]*beta)*baseline[t[n]];
+    hazard[n] = exp(x[n,]*beta_bg)*baseline[t[n]];
   }
 }
 model {
   for (i in 1:T) {
     baseline[i] ~ gamma(r * t_dur[i] * c, c);
   }
-  beta ~ cauchy(0, 2);
+  beta_bg_raw ~ normal(0.0, 1.0);
   event ~ poisson(hazard);
 }
+
 generated quantities {
   real log_lik[N];
   

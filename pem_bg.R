@@ -4,15 +4,38 @@ N          = total number of observations (length of data)
 S          = number of sample ids
 T          = max timepoint (number of timepoint ids)
 M          = number of covariates
+
 // data
 s          = sample id for each obs
 t          = timepoint id for each obs
 event      = integer indicating if there was an event at time t for sample s
 x          = matrix of real-valued covariates at time t for sample n [N, X]
 obs_t      = observed end time for interval for timepoint for that obs
+
 */
   // Jacqueline Buros Novik <jackinovik@gmail.com>
   
+  
+  functions {
+    vector sqrt_vec(vector x) {
+      vector[dims(x)[1]] res;
+      
+      for (m in 1:dims(x)[1]){
+        res[m] <- sqrt(x[m]);
+      }
+      
+      return res;
+    }
+    
+    vector bg_prior_lp(real r_global, vector r_local) {
+      r_global ~ normal(0.0, 10.0);
+      r_local ~ inv_chi_square(1.0);
+      
+      return r_global * sqrt_vec(r_local);
+    }
+  }
+
+
   data {
     int<lower=1> N;
     int<lower=1> S;
@@ -65,6 +88,7 @@ model {
   beta ~ cauchy(0, 2);
   event ~ poisson(hazard);
 }
+
 generated quantities {
   real log_lik[N];
   
