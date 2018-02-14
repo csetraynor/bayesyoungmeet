@@ -108,6 +108,7 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   lambda<- as.vector(as.numeric(lambda))
   X <- array(matrix(as.numeric(X)), dim = c(n, length(beta)))
 
+  str(X)
   #prognostic index
   mu = exp (X %*% beta )
   #extract first interval baseline hazard
@@ -139,7 +140,7 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
     mutate(os_status = ifelse(is.na(surv_months), 'LIVING', 'DECEASED'),
            surv_months = ifelse(is.na(surv_months), tau[length(tau)], surv_months),
            id = seq(n), 
-           censor_months = rexp(n = n, rate = 1/100))   %>%
+           censor_months = runif(n) * rexp(n = n, rate = exp(-2)))   %>%
     dplyr::mutate(os_status = ifelse(surv_months < censor_months & os_status != 'LIVING',
                                      'DECEASED', 'LIVING'
     ),
@@ -152,14 +153,13 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   return(sim.data)
 }
 
-set.seed(342)
 test_n = 100
 test_tau = c(seq(0, 1200, length.out = test_n))
 test_baseline <- exp(-3)*runif(test_n - 1 , 0, 1)
 # tau = c(seq(0, 300, by = 90), seq(300, 800, by = 100)) #time in months
 # test_baseline <- exp(-4)*rev(seq(0.1, 1, by = 0.1))
 X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
-test_beta = c(1.5, -2)
+test_beta = c(3, 5)
 sim_data <-  pem_sim_data( beta = test_beta,
                            X = X,
                            tau = test_tau,
@@ -186,6 +186,11 @@ if(tau[1] != 0){
   tau <- c(0, tau)
 }
 
+#set t_obs
+
+t_obs <- as.numeric(sim_data %>% select(os_months) %>% unlist %>% sort())
+t_dur <- diff(c(0, t_obs))
+
 longdata <- survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
                                 cut = tau, data = (sim_data %>%
                                 mutate(deceased = os_status == "DECEASED"))) %>%
@@ -195,8 +200,9 @@ longdata <- survival::survSplit(Surv(time = os_months, event = deceased) ~ . ,
 #create time point id
 longdata <- longdata %>%
   group_by(id) %>%
-  mutate(t = seq(n())) %>%
-  ungroup()
+  mutate(t = seq(n()),
+         t_dur = os_months - tstart) %>%
+  ungroup() 
 
 #----Generate stan data----#
 M = length(test_beta)
@@ -205,48 +211,42 @@ gen_stan_data <- function(data){
     N = nrow(data),
     S = length(unique(longdata$t)),
     "T" = dplyr::n_distinct(data$t),
+    M=M,
     s = array(as.integer(data$id)),
     t = data$t,
-    M=M,
     event = as.integer(data$deceased),
-    obs_t = data$os_months,
-    x = array(matrix(c(data$continuos, data$discrete), ncol=M), dim=c(nrow(data), M))
+    x = array(matrix(c(data$continuos, data$discrete), ncol=M), dim=c(nrow(data), M)),
+    t_obs = t_obs,
+    t_dur = t_dur
   )
 }
 
-#---Set initial values---#
-gen_inits <- function() {
-  list(
-    beta = rcauchy(M, location = 0 , scale = 2),
-    baseline = rgamma(n = length(diff(tau)), shape = 1, scale = 0.001)
-  )
-}
 
 
 #---Set initial values---#
 gen_inits <- function() {
   list(
     beta = rcauchy(M, location = 0 , scale = 2),
-    c = abs(rcauchy(n = 1, scale = 0.001)),
-    r = abs(rcauchy(n = 1, scale = 0.1)),
-    baseline = rgamma(n = length(diff(tau)), shape = 0.1 * mean(diff(tau)), scale = 0.001)
+    log_baseline_mu = rnorm(1),
+    baseline_sigma = abs(rnorm(1)),
+    log_baseline_raw = rnorm(length(t_dur))
     
   )
 }
 
 #-----Run Stan-------#
 nChain <- 4
-stanfile <- 'pem_survival_model.stan'
+stanfile <- 'pem_unstructured.stan'
 rstan_options(auto_write = TRUE)
 simulated_fit <- stan(stanfile,
                       data = gen_stan_data(longdata),
                       init = gen_inits,
-                      iter = 1000,
+                      iter = 2000,
                       cores = min(nChain, parallel::detectCores()),
                       seed = 7327,
                       chains = nChain,
                       pars = c("beta", "baseline", "lp__")
-                      #control = list(adapt_delta = 0.99)
+                      #control = list(adapt_delta = 0.9, max_treedepth = 15)
 )
 
 #----Convergence review -----#
@@ -261,7 +261,6 @@ rstan::traceplot(simulated_fit, 'beta')
   
   
 #---Review posterior distribution of beta parameters--#
-
 
 pp_beta1 <- rstan::extract(simulated_fit,'beta[1]')$beta
 pp_beta2 <- rstan::extract(simulated_fit,'beta[2]')$beta

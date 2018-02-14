@@ -65,7 +65,7 @@ In addition, the new publication have a  pooled population of the previous and c
 glimpse(clinical_data)
 ```
 
-##Data Cleaning
+## Data Cleaning
 
 First we will consider to obtain a slightly better manipulable dataset. For example, these steps will convert the rownames to a new colunm id_sample, following the tidy dataset canons, the column names into lower case, and the "" into NA.
 
@@ -138,7 +138,7 @@ clinical_data <- clinical_data %>%
   arrange(os_months)
 ```
 
-##Distribution of event times
+## Distribution of event times
 
 Using the observed times, os_months, we can plot the distribution of times stratifying between censored and events, this will be helpful to understand the dataset, and to check our model in following steps. 
 
@@ -166,9 +166,9 @@ ggplot2::autoplot(mle.surv, conf.int = F) +
 
 The construct the PEM, partition the time in the following intervals:
 
-0 < \tau_{1} < \tau_{2} < ... < \tau_{J}
+$0 < \tau_{1} < \tau_{2} < ... < \tau_{J}$
 
-whit \tau_{j} > \y_{i} for all i= 1,2,...,n.  example, let the partition interval br tau = { 20 40 60 80}, further let take the ratio of the baseline hazard for each interval to respect the first baseline = (1 1.1 0.8 0.6 0.2) , we can visualise this partition as: 
+whit $\tau_{j} > \y_{i}$ for all i= 1,2,...,n.  example, let the partition interval be tau = { 20 40 60 80}, further let take the ratio of the baseline hazard for each interval to respect the first baseline = (1 1.1 0.8 0.6 0.2) , we can visualise this partition as: 
 
 ```{r KM curve, echo = FALSE}
 y0 <- c(1,1.1,0.8,0.6, 0.2)
@@ -188,10 +188,12 @@ if (interactive())
   file.edit(stanfile)
 ```
 
-##Testing the model on simulated data
+## Testing the model on simulated data
 
 We will now simulate exponentially correlated data to test the model.
 The function to simulate the data is based on the article by [Rainer Walke] (http://www.demogr.mpg.de/papers/technicalreports/tr-2010-003.pdf), however we will do slight modifications on the censoring rate. As proposed by Jacqueline Buros, the censoring rate must be independent of the hazard. This as a usual assumption of the proportional hazard model. Moreover, if this assumptions is not tenable a different model must be considered, for example the competing risk model.
+
+Following the paper by [Rainer Walke] (http://www.demogr.mpg.de/papers/technicalreports/tr-2010-003.pdf) we use an auxilliary matrix to compute the recurrence relation between the succesive intervals in the survival expectancy. The rationale is that the cumulative hazard, and thus the survival are given by the previous interval at each time point.
 
 First, we will illustrate the simulation of 100 individuals, where x is the covariate values and beta the regression coefficients.
 
@@ -221,7 +223,7 @@ rel_base_risk <- lambda/lambda0
 rel_risk = lapply(mu, "*" , rel_base_risk)
 ```
 
-Then we need to calculate the duration of the intervals, create a helping matrix to calculate the hazard at each interval , and draw a uniform random variable S ~ (0,1), S = 1 - F.
+Then we need to calculate the duration of the intervals, create a helping matrix to calculate the hazard at each interval , and draw a uniform random variable $S ~ (0,1), S = 1 - F$.
 
 ```{r}
   #caculate duration
@@ -248,7 +250,23 @@ t = mapply(function(x, y, z) {
 )
 ```
 
-Following the paper by [Rainer Walke] (http://www.demogr.mpg.de/papers/technicalreports/tr-2010-003.pdf) we use an auxilliary matrix to compute the recurrence relation between the succesive intervals in the survival expectancy. The rationale is that the cumulative hazard, and thus the survival are given by the previous interval at each time point.
+And finally we can build the dataset. Note also that we pick a censoring rate using rexp(), although other rates could be used, in general the censoring is a nuissance parameter, and a distribution that does not depend to the survival outcome may be valid.
+```{r}
+  sim.data <- data_frame(surv_months = t) %>%
+    mutate(os_status = ifelse(is.na(surv_months), 'LIVING', 'DECEASED'),
+           surv_months = ifelse(is.na(surv_months), tau[length(tau)], surv_months),
+           id = seq(n), 
+           censor_months = rexp(n = n, rate = 1/100))%>%
+    dplyr::mutate(os_status = ifelse(surv_months < censor_months & os_status != 'LIVING',
+                                     'DECEASED', 'LIVING'
+    ),
+    os_months = ifelse(surv_months < censor_months  & os_status != 'LIVING',
+                       surv_months, censor_months
+    )
+    ) %>%   cbind(X) %>%
+    rename("continuos" = "1", "discrete" = "2")
+```
+
 
 We could wrap the simulate PEM survival times with the following function, where n is the number of individuals to simulate, tau is the tau interval partitions of the time axis and bh is the estimated baseline hazard for each interval.
 
@@ -302,15 +320,13 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
     os_months = ifelse(surv_months < censor_months  & os_status != 'LIVING',
                        surv_months, censor_months
     )
-    ) %>%   cbind(X) %>%
-    rename("continuos" = "1", "discrete" = "2")
+    ) %>%   cbind(X) 
   
   return(sim.data)
 }
 ```
 
 
-Note also that we pick a censoring rate using rexp(), although other rates could be used, in general the censoring is a nuissance parameter, and a distribution that does not depend to the survival outcome may be valid.
 
 Now we can simulate a dataset similar to the dataset from TCGA.
 ```{r simulate data}

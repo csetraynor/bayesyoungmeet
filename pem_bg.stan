@@ -49,12 +49,12 @@ data {
 transformed data {
   real t_dur[T];  // duration for each timepoint
   real t_obs[T];  // observed end time for each timepoint
-  real c;
-  real r;
+  real c_unit;
+  real r_unit;
   
   // baseline hazard params (fixed)
-  c = 0.001;
-  r = 0.1;
+  c_unit = 0.001;
+  r_unit = 0.1;
   
   // capture observation time for each timepoint id t
   for (i in 1:N) {
@@ -74,29 +74,43 @@ parameters {
   vector[M] beta_bg_raw; // beta for each covariate
   real<lower=0> tau_s_bg_raw;
   vector<lower=0>[M] tau_bg_raw;
+  real<lower=0> c_raw;
+  real<lower=0> r_raw;
 }
 transformed parameters {
-  vector<lower=0>[N] hazard;
+  vector[N] log_hazard;
+  vector[T] log_baseline;
   vector[M] beta_bg;
+  real<lower=0> c;
+  real<lower=0> r;
+  
+  r = r_unit*r_raw;
+  c = c_unit*c_raw;
   
   beta_bg = bg_prior_lp(tau_s_bg_raw, tau_bg_raw) .* beta_bg_raw;
   
+  log_baseline = log(baseline);
+  
   for (n in 1:N) {
-    hazard[n] = exp(x[n,]*beta_bg)*baseline[t[n]];
+    log_hazard[n] = x[n,]*beta_bg + log_baseline[t[n]];
   }
+  
 }
 model {
   for (i in 1:T) {
     baseline[i] ~ gamma(r * t_dur[i] * c, c);
   }
   beta_bg_raw ~ normal(0.0, 1.0);
-  event ~ poisson(hazard);
+  event ~ poisson_log(log_hazard);
+  c_raw ~ normal(0, 1);
+  r_raw ~ normal(0, 1);
 }
 
 generated quantities {
   real log_lik[N];
   
-  for (i in 1:N) {
-    log_lik[i] = poisson_lcdf(event[i] | hazard[i]);
+  // log-likelihood, for loo
+  for (n in 1:N) {
+      log_lik[n] = poisson_log_lpmf(event[n] | log_hazard[n]);
   }
 }
