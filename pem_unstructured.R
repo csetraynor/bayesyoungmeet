@@ -153,13 +153,14 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   return(sim.data)
 }
 
+set.seed(342)
 test_n = 100
 test_tau = c(seq(0, 1200, length.out = test_n))
 test_baseline <- exp(-3)*runif(test_n - 1 , 0, 1)
 # tau = c(seq(0, 300, by = 90), seq(300, 800, by = 100)) #time in months
 # test_baseline <- exp(-4)*rev(seq(0.1, 1, by = 0.1))
 X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
-test_beta = c(3, 5)
+test_beta = c(0.5, 1)
 sim_data <-  pem_sim_data( beta = test_beta,
                            X = X,
                            tau = test_tau,
@@ -178,21 +179,13 @@ autoplot(survival::survfit(Surv(os_months, os_deceased) ~ 1,
   ggtitle('Simulated KM curve')
 #------ long data format ----#
 
-#set the tau interval times
-tau <- sim_data %>% select(os_months) %>% unlist %>% unique %>%
-  sort()
-
-if(tau[1] != 0){
-  tau <- c(0, tau)
-}
-
 #set t_obs
 
 t_obs <- as.numeric(sim_data %>% select(os_months) %>% unlist %>% sort())
 t_dur <- diff(c(0, t_obs))
 
 longdata <- survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
-                                cut = tau, data = (sim_data %>%
+                                cut = test_tau, data = (sim_data %>%
                                 mutate(deceased = os_status == "DECEASED"))) %>%
                                 arrange(id, os_months)
 
@@ -209,8 +202,8 @@ M = length(test_beta)
 gen_stan_data <- function(data){
   stan_data <- list(
     N = nrow(data),
-    S = length(unique(longdata$t)),
-    "T" = dplyr::n_distinct(data$t),
+    S = length(unique(longdata$id)),
+    "T" = dplyr::n_distinct(data$id),
     M=M,
     s = array(as.integer(data$id)),
     t = data$t,
@@ -241,7 +234,7 @@ rstan_options(auto_write = TRUE)
 simulated_fit <- stan(stanfile,
                       data = gen_stan_data(longdata),
                       init = gen_inits,
-                      iter = 2000,
+                      iter = 1000,
                       cores = min(nChain, parallel::detectCores()),
                       seed = 7327,
                       chains = nChain,
@@ -305,7 +298,7 @@ pp_newdata <-
   purrr::pmap(list(pp_beta_bg, pp_lambda),
               function(pp_beta, pp_lambda) {pem_sim_data(lambda = pp_lambda, 
                                            beta = pp_beta,
-                                           tau = tau,
+                                           tau = c(test_tau, Inf),
                                            n = test_n,
                                            X = X)
               } )
@@ -373,18 +366,14 @@ gen_stan_data <- function(data, formula = as.formula(~1)) {
   
   data <- tibble::rownames_to_column(data, var = "id")
   
-  tau <- data %>% 
-    filter(os_status == "DECEASED") %>%
-    select(os_months) %>% 
-    unlist() %>%
-    unique() %>%
+  #set the tau interval times
+  tau <- data %>% filter(os_status == "DECEASED") %>% select(os_months) %>% unlist %>% unique %>%
     sort()
   
-  if(tau[1] == 0){
-    tau <- c(tau, 12*10^3)
-  } else {
-    tau <- c(0, tau, 12*10^3)
+  if(tau[1] != 0){
+    tau <- c(0, tau)
   }
+  
   
   longdata <- tbl_df(survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
                                   cut = tau,

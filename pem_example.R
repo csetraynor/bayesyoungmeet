@@ -159,7 +159,7 @@ test_baseline <- exp(-3)*runif(test_n - 1 , 0, 1)
 # tau = c(seq(0, 300, by = 90), seq(300, 800, by = 100)) #time in months
 # test_baseline <- exp(-4)*rev(seq(0.1, 1, by = 0.1))
 X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
-test_beta = c(1.5, -2)
+test_beta = c(0.5, 1)
 sim_data <-  pem_sim_data( beta = test_beta,
                            X = X,
                            tau = test_tau,
