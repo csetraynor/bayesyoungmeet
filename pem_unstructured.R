@@ -108,8 +108,7 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   lambda<- as.vector(as.numeric(lambda))
   X <- array(matrix(as.numeric(X)), dim = c(n, length(beta)))
 
-  str(X)
-  #prognostic index
+    #prognostic index
   mu = exp (X %*% beta )
   #extract first interval baseline hazard
   lambda0 <- lambda[1]
@@ -140,7 +139,7 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
     mutate(os_status = ifelse(is.na(surv_months), 'LIVING', 'DECEASED'),
            surv_months = ifelse(is.na(surv_months), tau[length(tau)], surv_months),
            id = seq(n), 
-           censor_months = runif(n) * rexp(n = n, rate = exp(-2)))   %>%
+           censor_months = rexp(n = n, rate = 1/100))   %>%
     dplyr::mutate(os_status = ifelse(surv_months < censor_months & os_status != 'LIVING',
                                      'DECEASED', 'LIVING'
     ),
@@ -160,7 +159,7 @@ test_baseline <- exp(-3)*runif(test_n - 1 , 0, 1)
 # tau = c(seq(0, 300, by = 90), seq(300, 800, by = 100)) #time in months
 # test_baseline <- exp(-4)*rev(seq(0.1, 1, by = 0.1))
 X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
-test_beta = c(0.5, 1)
+test_beta = c(2.5, 2)
 sim_data <-  pem_sim_data( beta = test_beta,
                            X = X,
                            tau = test_tau,
@@ -181,20 +180,18 @@ autoplot(survival::survfit(Surv(os_months, os_deceased) ~ 1,
 
 #set t_obs
 
-t_obs <- as.numeric(sim_data %>% select(os_months) %>% unlist %>% sort())
-t_dur <- diff(c(0, t_obs))
+sim_data <- sim_data %>% arrange(os_months)
 
-longdata <- survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
-                                cut = test_tau, data = (sim_data %>%
-                                mutate(deceased = os_status == "DECEASED"))) %>%
-                                arrange(id, os_months)
+longdata <- survival::survSplit(Surv(time = os_months,
+                                     event = deceased) ~ . , 
+                                cut = t_obs, data = (sim_data %>%
+                                mutate(deceased = os_status == "DECEASED")))
 
 
 #create time point id
 longdata <- longdata %>%
   group_by(id) %>%
-  mutate(t = seq(n()),
-         t_dur = os_months - tstart) %>%
+  mutate(t = seq(n())) %>%
   ungroup() 
 
 #----Generate stan data----#
@@ -203,48 +200,50 @@ gen_stan_data <- function(data){
   stan_data <- list(
     N = nrow(data),
     S = length(unique(longdata$id)),
-    "T" = dplyr::n_distinct(data$id),
+    "T" = max(data$t),
     M=M,
-    s = array(as.integer(data$id)),
+    s = as.integer(data$id),
     t = data$t,
     event = as.integer(data$deceased),
-    x = array(matrix(c(data$continuos, data$discrete), ncol=M), dim=c(nrow(data), M)),
-    t_obs = t_obs,
-    t_dur = t_dur
+    x = array(matrix(c(data$continuos, data$discrete), ncol=M), 
+              dim=c(nrow(data), M)),
+    obs_t = data$os_months
   )
 }
 
 
 
 #---Set initial values---#
-gen_inits <- function() {
+gen_inits <- function(M) {
+  function() 
   list(
-    beta = rcauchy(M, location = 0 , scale = 2),
     log_baseline_mu = rnorm(1),
-    baseline_sigma = abs(rnorm(1)),
-    log_baseline_raw = rnorm(length(t_dur))
-    
+    baseline_sigma = log(rnorm(1)),
+    log_baseline_raw = rnorm(length(t_dur)),
+    tau_s_bg_raw = 0.1*abs(rnorm(1)),
+    tau_bg_raw = array(abs(rnorm(M)), dim = c(M)),
+    beta_bg_raw = array(rnorm(M), dim = c(M))
   )
 }
 
 #-----Run Stan-------#
-nChain <- 4
+nChain <- 1
 stanfile <- 'pem_unstructured.stan'
 rstan_options(auto_write = TRUE)
 simulated_fit <- stan(stanfile,
                       data = gen_stan_data(longdata),
-                      init = gen_inits,
-                      iter = 1000,
+                      init = gen_inits(M = M),
+                      iter = 2000,
                       cores = min(nChain, parallel::detectCores()),
                       seed = 7327,
                       chains = nChain,
-                      pars = c("beta", "baseline", "lp__")
+                      pars = c("beta_bg", "baseline", "lp__")
                       #control = list(adapt_delta = 0.9, max_treedepth = 15)
 )
 
 #----Convergence review -----#
 print(simulated_fit)
-pairs(simulated_fit, pars = c("lp__", "beta"), las = 1)
+pairs(simulated_fit, pars = c("lp__", "beta_bg"), las = 1)
 
 rstan::traceplot(simulated_fit, 'lp__')
 rstan::traceplot(simulated_fit, 'beta')
@@ -302,7 +301,6 @@ pp_newdata <-
                                            n = test_n,
                                            X = X)
               } )
-
 ggplot(pp_newdata %>%
          dplyr::bind_rows() %>%
          dplyr::mutate(type = 'posterior predicted values') %>%
@@ -441,7 +439,7 @@ nChain <- 1
 stanfile <- 'pem_bg.stan'
 rstan_options(auto_write = TRUE)
 simulated_fit <- stan(stanfile,
-                      data = gen_stan_data(clinical_data, '~ I(sex == "Male") + age'),
+                      data = gen_stan_data(clinical_data, '~ age'),
                       init = gen_inits,
                       iter = 10,
                       cores = min(nChain, parallel::detectCores()),
@@ -452,25 +450,6 @@ simulated_fit <- stan(stanfile,
 
 
 ###########
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 pp_predict_surv <- function(pp_beta, pp_lambda, n, tau, X,
                             level = 0.9, 
@@ -543,6 +522,4 @@ pp_predict_surv <- function(pp_beta, pp_lambda, n, tau, X,
   
   pl 
 }
-
-
 

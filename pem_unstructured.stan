@@ -16,7 +16,27 @@
  t_dur      = duration of each timepoint period (first diff of t_obs)
 
 */
-// Jacqueline Buros Novik <jackinovik@gmail.com>
+// Carlos Serra Traynor <carlos.serra91@gmail.com>
+
+  
+functions {
+  vector sqrt_vec(vector x) {
+      vector[dims(x)[1]] res;
+      
+      for (m in 1:dims(x)[1]){
+        res[m] = sqrt(x[m]);
+      }
+      
+      return res;
+    }
+    
+    vector bg_prior_lp(real r_global, vector r_local) {
+      r_global ~ normal(0.0, 10.0);
+      r_local ~ inv_chi_square(1.0);
+      
+    return r_global * sqrt_vec(r_local);
+  }
+}
 
 data {
   // dimensions
@@ -30,18 +50,32 @@ data {
   int<lower=1, upper=T> t[N];     // timepoint id
   int<lower=0, upper=1> event[N]; // 1: event, 0:censor
   matrix[N, M] x;                 // explanatory vars
+  real<lower=0> obs_t[N];         // observed end time for each obs
 
-  // timepoint data
-  vector<lower=0>[T] t_obs;
-  vector<lower=0>[T] t_dur;
 }
 transformed data {
+    // timepoint data
+  vector<lower=0>[T] t_obs;
+  vector<lower=0>[T] t_dur;
   vector[T] log_t_dur;  // log-duration for each timepoint
   int n_trans[S, T];
+  
+    // capture observation time for each timepoint id t
+  for (i in 1:N) {
+      // assume these are constant per id across samples
+      t_obs[t[i]] = obs_t[i];
+  }
+  
+  // duration of each timepoint
+  // duration at first timepoint = t_obs[1] ( implicit t0 = 0 )
+  t_dur[1] = t_obs[1];
+  for (i in 2:T) {
+      t_dur[i] = t_obs[i] - t_obs[i-1];
+  }
 
-  log_t_dur = log(t_obs);
-
-  // n_trans used to map each sample*timepoint to n (used in gen quantities)
+  log_t_dur = log(t_dur);
+  
+    // n_trans used to map each sample*timepoint to n (used in gen quantities)
   // map each patient/timepoint combination to n values
   for (n in 1:N) {
       n_trans[s[n], t[n]] = n;
@@ -63,32 +97,40 @@ transformed data {
           }
       }
   }
+
 }
 parameters {
-  vector[T] log_baseline_raw; // unstructured baseline hazard for each timepoint t
-  vector[M] beta;         // beta for each covariate
+    vector[T] log_baseline_raw; // unstructured baseline hazard for each timepoint t
   real<lower=0> baseline_sigma;
   real log_baseline_mu;
+  real<lower=0> tau_s_bg_raw;
+  vector<lower=0>[M] tau_bg_raw; // beta for each covariate
+  vector[M] beta_bg_raw;
 }
 transformed parameters {
+  vector[M] beta_bg;
   vector[N] log_hazard;
-  vector[T] log_baseline;     // unstructured baseline hazard for each timepoint t
+  vector[T] log_baseline;//unstructured baseline hazard for each timepoint t
 
+  beta_bg = bg_prior_lp(tau_s_bg_raw, tau_bg_raw) .* beta_bg_raw;
   log_baseline = log_baseline_mu + log_baseline_raw + log_t_dur;
 
   for (n in 1:N) {
-    log_hazard[n] = log_baseline[t[n]] + x[n,]*beta;
+    log_hazard[n] = log_baseline[t[n]] + x[n,]*beta_bg;
   }
 }
 model {
-  beta ~ cauchy(0, 2);
-  event ~ poisson_log(log_hazard);
+  beta_bg_raw ~ normal(0.0, 1.0);                                             event ~ poisson_log(log_hazard);
+  // Prior on hazard parameters
   log_baseline_mu ~ normal(0, 1);
-  baseline_sigma ~ normal(0, 1);
-  log_baseline_raw ~ normal(0, baseline_sigma);
+  baseline_sigma ~ lognormal(0, 2);
+  log_baseline_raw[1] ~ normal(0, baseline_sigma);
+  	for(n in 2:T) {
+		log_baseline_raw[n] ~ normal(log_baseline_raw[n-1],baseline_sigma);
+	 }
 }
 generated quantities {
-  real log_lik[N];
+ real log_lik[N];
   vector[T] baseline;
   real y_hat_time[S];      // predicted failure time for each sample
   int y_hat_event[S];      // predicted event (0:censor, 1:event)
@@ -113,7 +155,7 @@ generated quantities {
 
               // determine predicted value of this sample's hazard
               n = n_trans[samp, tp];
-              log_haz = log_baseline[tp] + x[n,] * beta;
+              log_haz = log_baseline[tp] + x[n,] * beta_bg;
 
               // now, make posterior prediction of an event at this tp
               if (log_haz < log(pow(2, 30)))
