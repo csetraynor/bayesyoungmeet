@@ -180,16 +180,21 @@ autoplot(survival::survfit(Surv(os_months, os_deceased) ~ 1,
 
 #set t_obs
 
+t_obs <- sim_data %>% dplyr::select(os_months) %>%
+  unlist() %>% sort()
+
 sim_data <- sim_data %>% arrange(os_months)
 
 longdata <- survival::survSplit(Surv(time = os_months,
                                      event = deceased) ~ . , 
                                 cut = t_obs, data = (sim_data %>%
-                                mutate(deceased = os_status == "DECEASED")))
+                                mutate(
+                                  deceased = os_status == "DECEASED")))
 
 
 #create time point id
 longdata <- longdata %>%
+  dplyr::arrange(id, os_months)  %>%
   group_by(id) %>%
   mutate(t = seq(n())) %>%
   ungroup() 
@@ -218,7 +223,7 @@ gen_inits <- function(M) {
   function() 
   list(
     log_baseline_mu = rnorm(1),
-    baseline_sigma = log(rnorm(1)),
+    baseline_sigma = log(abs(rnorm(1))),
     log_baseline_raw = rnorm(length(t_dur)),
     tau_s_bg_raw = 0.1*abs(rnorm(1)),
     tau_bg_raw = array(abs(rnorm(M)), dim = c(M)),
@@ -233,7 +238,7 @@ rstan_options(auto_write = TRUE)
 simulated_fit <- stan(stanfile,
                       data = gen_stan_data(longdata),
                       init = gen_inits(M = M),
-                      iter = 2000,
+                      iter = 10,
                       cores = min(nChain, parallel::detectCores()),
                       seed = 7327,
                       chains = nChain,
