@@ -1,6 +1,6 @@
 ---
-title: "An example of the piecewise exponential model (PEM)"
-author : Carlos S Traynor
+title: "An example of the piecewise exponential model (PEM) with Laplacian prior using a cancer dataset for survival analysis"
+author : Carlos S. Traynor
 output: html_document
 ---
 
@@ -37,15 +37,15 @@ The most common example of survival models is the Cox model, which assumes leave
 
 ## Outline
 
-In this example we will go over again some points already seen in the vignette Applied Survival Models by Jacqueline Buros, before touching the example of the piecewise exponential model. If you have not already read her vignete, you could do asap because you will find many interesting explanations that we might go over quicly. It is also possible to skip the section data cleaning if the vignette has been read.
+In this example we will go over again some points already seen in the vignette Applied Survival Models by Jacqueline Buros, before touching the example of the piecewise exponential model. If you have not already read the vignete, you should do asap because you will find many interesting explanations that we might fly over quicly. 
 
-We will cover the following:
+In this example will be covered the following topics:
 
--Download data from TCGA
+-Download data from TCGA.
 -Review PEM model.
 -Test PEM model against simulated data.
--Fit NULL PEM model with TCGA data.
 -Check convergence and review posterior predictive check on model.
+-Fit PEM model with TCGA data.
 
 ## Download data
 
@@ -87,6 +87,7 @@ clinical_data <- clinical_data %>%
 ```
 
 Now we can inspect easily the missing data, for example we can plot different combinations of missing values for each covariate using the function aggr form the package VIM.
+
 ```{r VIM plot}
 clinical_data %>%
   VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
@@ -96,7 +97,7 @@ Let's consider the overall survival as the response variable. The variable os_mo
 
 ## Missing survival times
 
-It is not strange that appart of the censored observation to find in a dataset missing, NA, observed time values or censoring indicator. Just for now we will discard these observations.
+It is not strange to find in a dataset missing time event or censored values or censoring indicator. We could impute them if we have got covariate values for those individuals. On the other hand, covariate values may also be missing for the same individuals, in that case these observations have to de disregarded. Just for now we will discard these observations.
 
 ```{r inspect missing data}
 clinical_data %>% 
@@ -131,13 +132,6 @@ clinical_data %>%
   VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
 ```
 
-It is a good practice in survival analysis to arrange the dataset by observed survival times.
-
-```{r arrange dataset}
-clinical_data <- clinical_data %>%
-  arrange(os_months)
-```
-
 ## Distribution of event times
 
 Using the observed times, os_months, we can plot the distribution of times stratifying between censored and events, this will be helpful to understand the dataset, and to check our model in following steps. 
@@ -164,54 +158,53 @@ ggplot2::autoplot(mle.surv, conf.int = F) +
 
 ## Piecewise Exponential Model (PEM)
 
-The construct the PEM, partition the time in the following intervals:
+Let $t$ denote the time-to-event outcome, for the $ith$ individual, and $c_{i}$ the censoring indicator. A PEM will be build on a usual hazard function:
+$h\left ( t,\psi _{i} \right ) =  \lambda _{0} (t, \alpha _{i}) e^{\beta \cdot c_{i}}$
+Where $\lambda_{0}$ is defined as a nonparametric mixture of piecewise constant hazard functions. $c_{i}$ are the covariate values, which may be a function of time.
+Lets consider the following time axis partition:
 
 $0 < \tau_{1} < \tau_{2} < ... < \tau_{J}$
 
-whit $\tau_{j} > \y_{i}$ for all i= 1,2,...,n.  example, let the partition interval be tau = { 20 40 60 80}, further let take the ratio of the baseline hazard for each interval to respect the first baseline = (1 1.1 0.8 0.6 0.2) , we can visualise this partition as: 
+whit $\tau_{j} > \y_{i}$ for all $i= 1,2,...,n$, we can visualise this partition as: 
 
 ```{r KM curve, echo = FALSE}
 y0 <- c(1,1.1,0.8,0.6, 0.2)
 sfun  <- stepfun(seq(20, 80, by = 20), y0, f = 0)
 plot(sfun,  main = "Step function of PEM", xlab = "time (months)", ylab = "baseline hazard ratio", ylim= c(0, 1.2))
 ```
-
-We can think of it as two first periods where individuals have a high rate of failure, while the survivors at 20 months have a better chance to avoid an event.
-
-The stan code for the model can be found in the biostan package:
+We can think of it as first two periods where the hazard rate is higher than in the last two.
+The stan code for the model can be found in:
 
 ```{r stan model}
-stanfile <- "pem_clinical_model.stan"
-biostan::print_stan_file(stan_file)
+stanfile <- "pem_bg.stan"
 #or open stan file
 if (interactive())
   file.edit(stanfile)
 ```
 
+Here, we will use the PEM model from the survivalstan authored by Jacqueline Buros, including a laplace prior fro the beta regression parameters, which were introduced by Tomi Peltola in the paper (http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.662.1560&rep=rep1&type=pdf).
+
 ## Testing the model on simulated data
 
 We will now simulate exponentially correlated data to test the model.
-The function to simulate the data is based on the article by [Rainer Walke] (http://www.demogr.mpg.de/papers/technicalreports/tr-2010-003.pdf), however we will do slight modifications on the censoring rate. As proposed by Jacqueline Buros, the censoring rate must be independent of the hazard. This as a usual assumption of the proportional hazard model. Moreover, if this assumptions is not tenable a different model must be considered, for example the competing risk model.
-
-Following the paper by [Rainer Walke] (http://www.demogr.mpg.de/papers/technicalreports/tr-2010-003.pdf) we use an auxilliary matrix to compute the recurrence relation between the succesive intervals in the survival expectancy. The rationale is that the cumulative hazard, and thus the survival are given by the previous interval at each time point.
-
 First, we will illustrate the simulation of 100 individuals, where x is the covariate values and beta the regression coefficients.
-
 ```{r simulate data}
+set.seed(1243)
 n = 100
-X <- matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
-beta <- c(1.5,2)
+X_test <- matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
+test_beta <- c(1.5,2)
 ```
 
-Hence, the prognostic index mu for each individual is given by:
+The prognostic index mu for each individual is given by:
 ```{r simulate data}
 mu = exp (X %*% beta )
 ```
 
-Further lets consider the partition of the time axis tau, and the baseline hazard lambda at each interval.
+Further lets consider the partition of the time axis tau, and the baseline hazard at each interval.
 
 ```{r simulate data}
-lambda = exp(-2.9)* c(1, 0.8, 0.2, 0.25, 0.125); tau = c(0, 10, 15, 30, 50, 100)
+test_tau = c(seq(0, 1200, length.out = test_n))
+test_baseline <- exp(-3)*runif(test_n - 1 , 0, 1)
 ```
 
 The relative hazard at each interval is computed by:
@@ -267,17 +260,17 @@ And finally we can build the dataset. Note also that we pick a censoring rate us
     rename("continuos" = "1", "discrete" = "2")
 ```
 
+As shown in the vignette (https://github.com/jburos/biostan/blob/master/vignettes/weibull-survival-model.Rmd), the censoring rate must be independent of the hazard to obtain reasonable outcome. This is a usual assumption of the proportional hazard model that makes differences with the the competing risk model.
+Following the paper by [Rainer Walke] (http://www.demogr.mpg.de/papers/technicalreports/tr-2010-003.pdf) we use an auxilliary matrix to compute the recurrence relation between the succesive intervals in the survival expectancy. 
 
-We could wrap the simulate PEM survival times with the following function, where n is the number of individuals to simulate, tau is the tau interval partitions of the time axis and bh is the estimated baseline hazard for each interval.
+We could wrap the simulate PEM survival times with the following function, where n is the number of individuals to simulate, tau is the tau interval partitions of the time axis and lambda is the estimated baseline hazard for each interval, beta is the vector of regression coefficients and X the matrix of covariate values.
 
 ```{r PEM model simulation}
 pem_sim_data <- function(n, tau, beta, lambda, X, ...){
-  
   #format check
   beta <- as.vector(as.numeric(beta))
   lambda<- as.vector(as.numeric(lambda))
   X <- array(matrix(as.numeric(X)), dim = c(n, length(beta)))
-  
   #prognostic index
   mu = exp (X %*% beta )
   #extract first interval baseline hazard
@@ -286,13 +279,9 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   rel_base_risk <- lambda/lambda0
   rel_risk = lapply(mu, "*" , rel_base_risk)
   #caculate duration
-  if(tau[1] == 0){
-      dt <- diff(c(tau, 12*10^3)) #In months
-  } else {
-      dt <- diff(c(0, tau, 12*10^3))
-  }
+  dt = diff(tau)
   assertthat::assert_that(length(dt) == length(lambda))
-  #create a helping matrix
+  #create a helping matrix for finding event time
   LD <- matrix(0, nrow = length(tau), ncol = length(rel_base_risk))
   LD[lower.tri(LD)] <- 1;
   #compute log survival
@@ -308,46 +297,38 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
     return(t)
   } , x = lsm, y = rel_risk , z = as.list(logsurv)
   )
-  
+  #create data set
   sim.data <- data_frame(surv_months = t) %>%
     mutate(os_status = ifelse(is.na(surv_months), 'LIVING', 'DECEASED'),
            surv_months = ifelse(is.na(surv_months), tau[length(tau)], surv_months),
            id = seq(n), 
-           censor_months = rexp(n = n, rate = 1/100))%>%
+           censor_months = rexp(n = n, rate = 1/100))   %>% #censoring rate
     dplyr::mutate(os_status = ifelse(surv_months < censor_months & os_status != 'LIVING',
                                      'DECEASED', 'LIVING'
     ),
     os_months = ifelse(surv_months < censor_months  & os_status != 'LIVING',
                        surv_months, censor_months
     )
-    ) %>%   cbind(X) 
-  
+    ) %>%   cbind(X) #joint covariates
   return(sim.data)
 }
 ```
-
-
-
 Now we can simulate a dataset similar to the dataset from TCGA.
 ```{r simulate data}
 set.seed(342)
 test_n = 100
-# tau = c(seq(0, 900, length.out = test_n))
-# test_baseline <- exp(-3)*runif(test_n , 0, 1)
-tau = c(seq(0, 300, by = 90), seq(300, 800, by = 100)) #time in months
-test_baseline <- exp(-4)*rev(seq(0.1, 1, by = 0.1))
-X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
-beta = c(1.5, -2)
-sim_data <-  pem_sim_data( beta = beta,
-                           X = X,
-                           tau = tau,
+test_tau = c(seq(0, 1200, length.out = test_n))
+test_baseline <- exp(-3)*runif(test_n - 1 , 0, 1)
+X_test = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
+test_beta = c(0.5, 1)
+sim_data <-  pem_sim_data( beta = test_beta,
+                           X = X_test,
+                           tau = test_tau,
                            lambda = test_baseline,
                            n = test_n
 )
 ```
-
-
-Plot the simulated data, that looks like this:
+The Kaplan and Meier estimates for the simulated data:
 ```{r plot time distribution, echo=TRUE}
 ## plot KM curve from simulated data
 sim_data <- 
@@ -359,25 +340,19 @@ autoplot(survival::survfit(Surv(os_months, os_deceased) ~ 1,
                       ), conf.int = F) + 
     ggtitle('Simulated KM curve')
 ```
-
-The next step is to fit the simulated data to the stan model, but first it is needed to convert the dataset into long data format, this is usually requested for fitting PEM, the new dataset will have one observation for each individual and time point. This function will be also useful when fiting the actual dataset. 
-
+The next step is to fit the the stan model with the simulated data. But before it is needed to convert the dataset to long format, which will have one observation for each individual and time point. 
 ```{r format long data}
 #order the dataset by observed times
 sim_data <- sim_data %>% 
   arrange(os_months)
 #set the tau interval times
-tau <- sim_data %>% 
-  filter(os_status == "DECEASED") %>%
-  select(os_months) %>% 
-  unlist() %>%
-  sort()
-
- 
+tau <- sim_data %>% select(os_months) %>% unlist %>% unique %>% sort()
+  if(tau[1] != 0){
+    tau <- c(0, tau)}
 longdata <- survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
                                 cut = tau, data = (sim_data %>%
-                                                       mutate(deceased = os_status == "DECEASED"))) %>%
-  arrange(id, os_months)
+                                mutate(deceased = os_status == "DECEASED")))
+
 #create time point id
 longdata <- longdata %>%
     group_by(id) %>%

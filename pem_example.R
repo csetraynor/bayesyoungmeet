@@ -1,5 +1,4 @@
 #----Load libraries---#
-
 library(purrr)
 library(httr)
 library(readr)
@@ -14,18 +13,17 @@ library(ggplot2)
 require(ggfortify)
 theme_set(theme_bw())
 library(VIM)
-
+library(caret)
 #---Download Data----#
-
 mycgds = CGDS("http://www.cbioportal.org/public-portal/")
 study_list = getCancerStudies(mycgds)
-id_sutdy = getCancerStudies(mycgds)[55,1]
+id_sutdy = getCancerStudies(mycgds)[56,1]
 case_list = getCaseLists(mycgds, id_sutdy)[2,1]
 clinical_data <-  tbl_df(getClinicalData(mycgds, case_list)) 
 
 #---- Data Cleaning ----#
-
 clinical_data <- clinical_data %>% tibble::rownames_to_column("sample_id") 
+clinical_data <- clinical_data %>% tibble::rownames_to_column("num_id") 
 names(clinical_data) <- tolower(names(clinical_data)) 
 #convert missig values into NA
 convert_blank_to_na <- function(x) {
@@ -38,76 +36,55 @@ convert_blank_to_na <- function(x) {
 }
 clinical_data <- clinical_data %>%
   dplyr::mutate_all(funs(convert_blank_to_na))
-
 #--Missing Data ---#
-
 clinical_data %>%
   VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
-
 clinical_data %>% 
   filter(is.na(os_status) | os_status == "") %>%
   select(os_months, os_status) %>%
   glimpse
-
 clinical_data %>% 
   filter(is.na(os_status) | os_status == "" |os_months < 0 | is.na(os_months)) %>%
   select(os_months, os_status) %>%
   glimpse
-
 #--- Remove Missing Obs ---#
-
 short_clin_dat <- 
   clinical_data %>% 
   filter(!is.na(os_status) & os_status != "" )
-
 #confirm 44 fewer observations
 assertthat::assert_that(nrow(short_clin_dat) == (nrow(clinical_data) - 44))
 clinical_data <- tbl_df(short_clin_dat)
 remove(short_clin_dat)
-
 clinical_data %>%
   VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
-
 #--- Distribution event times ---#
-
-clinical_data <- clinical_data %>%
-  arrange(os_months)
-
 clinical_data %>%
   ggplot(aes(x = os_months,
              group = os_status,
              colour = os_status,
              fill = os_status)) +
   geom_density(alpha = 0.5)
-
-mle.surv <- survfit(Surv(os_months, os_deceased) ~ 1,
+mle.surv <- survfit(Surv(os_months, os_deceased) ~ karnofsky_performance_score,
                     data = clinical_data %>%
                       mutate(os_deceased = (os_status == "DECEASED")))
 require(ggfortify)
 ggplot2::autoplot(mle.surv, conf.int = F) +
   ggtitle('KM survival for GGM Cohort')
-
 #----PEM Model ----#
-
 y0 <- c(1,1.1,0.8,0.6, 0.2)
 sfun  <- stepfun(seq(20, 80, by = 20), y0, f = 0)
 plot(sfun,  main = "Step function of PEM", xlab = "time (months)", ylab = "baseline hazard ratio", ylim= c(0, 1.2))
-
 stanfile <- "'pem_biostan.stan'"
 #biostan::print_stan_file(stanfile)
 #or open stan file
 if (interactive())
   file.edit(stanfile)
-
 #---Testing the model on simulated data---#
-
 pem_sim_data <- function(n, tau, beta, lambda, X, ...){
-  
   #format check
   beta <- as.vector(as.numeric(beta))
   lambda<- as.vector(as.numeric(lambda))
   X <- array(matrix(as.numeric(X)), dim = c(n, length(beta)))
-
   #prognostic index
   mu = exp (X %*% beta )
   #extract first interval baseline hazard
@@ -116,9 +93,12 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   rel_base_risk <- lambda/lambda0
   rel_risk = lapply(mu, "*" , rel_base_risk)
   #caculate duration
+  if(tau[1] != 0){
+    tau <- c(0, tau)
+  }
   dt = diff(tau)
   assertthat::assert_that(length(dt) == length(lambda))
-  #create a helping matrix
+  #create a helping matrix for finding event time
   LD <- matrix(0, nrow = length(tau), ncol = length(rel_base_risk))
   LD[lower.tri(LD)] <- 1;
   #compute log survival
@@ -134,183 +114,140 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
     return(t)
   } , x = lsm, y = rel_risk , z = as.list(logsurv)
   )
-  
+  #create data set
   sim.data <- data_frame(surv_months = t) %>%
     mutate(os_status = ifelse(is.na(surv_months), 'LIVING', 'DECEASED'),
            surv_months = ifelse(is.na(surv_months), tau[length(tau)], surv_months),
            id = seq(n), 
-           censor_months = rexp(n = n, rate = 1/100))   %>%
+           censor_months = rexp(n = n, rate = 1/100))   %>% #censoring rate
     dplyr::mutate(os_status = ifelse(surv_months < censor_months & os_status != 'LIVING',
                                      'DECEASED', 'LIVING'
     ),
     os_months = ifelse(surv_months < censor_months  & os_status != 'LIVING',
                        surv_months, censor_months
     )
-    ) %>%   cbind(X) %>%
-    rename("continuos" = "1", "discrete" = "2")
-  
+    ) %>%   cbind(X) #joint covariates
   return(sim.data)
 }
-
 set.seed(342)
 test_n = 100
 test_tau = c(seq(0, 1200, length.out = test_n))
 test_baseline <- exp(-3)*runif(test_n - 1 , 0, 1)
-# tau = c(seq(0, 300, by = 90), seq(300, 800, by = 100)) #time in months
-# test_baseline <- exp(-4)*rev(seq(0.1, 1, by = 0.1))
-X = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
+X_test = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
 test_beta = c(0.5, 1)
 sim_data <-  pem_sim_data( beta = test_beta,
-                           X = X,
+                           X = X_test,
                            tau = test_tau,
                            lambda = test_baseline,
-                           n = test_n
-)
-
+                           n = test_n)
 ## plot KM curve from simulated data
 sim_data <- 
   sim_data %>%
-  dplyr::mutate(os_deceased = os_status == 'DECEASED')
+  dplyr::mutate(os_deceased = os_status == 'DECEASED') %>%
+  rename("continuos" = "1", "discrete" = "2")
 
 autoplot(survival::survfit(Surv(os_months, os_deceased) ~ 1,
                            data = sim_data
 ), conf.int = F) + 
   ggtitle('Simulated KM curve')
 #------ long data format ----#
-
 #set the tau interval times
-tau <- sim_data %>% select(os_months) %>% unlist %>% unique %>%
-  sort()
-
-if(tau[1] != 0){
-  tau <- c(0, tau)
-}
-
+tau <- sim_data %>% select(os_months) %>% unlist %>% unique %>% sort()
 longdata <- survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
                                 cut = tau, data = (sim_data %>%
-                                mutate(deceased = os_status == "DECEASED"))) %>%
-                                arrange(id, os_months)
-
+                                mutate(deceased = os_status == "DECEASED")))
 
 #create time point id
 longdata <- longdata %>%
+  arrange(id, os_months)  %>%
   group_by(id) %>%
-  mutate(t = seq(n())) %>%
+  mutate(t_id = seq(n())) %>%
   ungroup()
-
+t_obs <- sim_data %>% select(os_months) %>% unlist %>% unique %>% sort()
+t_dur <- diff(tau)
 #----Generate stan data----#
 M = length(test_beta)
 gen_stan_data <- function(data){
   stan_data <- list(
     N = nrow(data),
-    S = length(unique(longdata$t)),
-    "T" = dplyr::n_distinct(data$t),
+    S = length(unique(longdata$id)),
+    "T" = dplyr::n_distinct(data$t_id),
     s = array(as.integer(data$id)),
-    t = data$t,
+    t_obs = t_obs,
+    t_dur = t_dur,
     M=M,
     event = as.integer(data$deceased),
-    obs_t = data$os_months,
+    t = data$t_id,
     x = array(matrix(c(data$continuos, data$discrete), ncol=M), dim=c(nrow(data), M))
   )
 }
-
 #---Set initial values---#
-gen_inits <- function() {
+gen_inits <-  function(M) {
+  function() 
   list(
-    beta = rcauchy(M, location = 0 , scale = 2),
-    baseline = rgamma(n = length(diff(tau)), shape = 1, scale = 0.001)
+    beta_bg_raw = rnorm(M),
+    tau_s_bg_raw = 0.1*abs(rnorm(1)),
+    tau_bg_raw = abs(rnorm(M)),
+    c_raw = abs(rnorm(1)),
+    r_raw = abs(rnorm(1)),
+    baseline = rgamma(n = length(diff(tau)), shape =  mean(diff(tau)) * 0.1, scale = 0.01)
   )
 }
-
-
-#---Set initial values---#
-gen_inits <- function() {
-  list(
-    beta = rcauchy(M, location = 0 , scale = 2),
-    c = abs(rcauchy(n = 1, scale = 0.001)),
-    r = abs(rcauchy(n = 1, scale = 0.1)),
-    baseline = rgamma(n = length(diff(tau)), shape = 0.1 * mean(diff(tau)), scale = 0.001)
-    
-  )
-}
-
 #-----Run Stan-------#
-nChain <- 4
-stanfile <- 'pem_survival_model.stan'
+nChain <- 1
+stanfile <- 'pem_bg.stan'
 rstan_options(auto_write = TRUE)
 simulated_fit <- stan(stanfile,
                       data = gen_stan_data(longdata),
-                      init = gen_inits,
+                      init = gen_inits(M=2),
                       iter = 1000,
                       cores = min(nChain, parallel::detectCores()),
                       seed = 7327,
                       chains = nChain,
-                      pars = c("beta", "baseline", "lp__")
+                      pars = c("beta_bg", "baseline", "lp__")
                       #control = list(adapt_delta = 0.99)
 )
-
 #----Convergence review -----#
 print(simulated_fit)
-pairs(simulated_fit, pars = c("lp__", "beta"), las = 1)
-
+pairs(simulated_fit, pars = c("lp__", "beta_bg"), las = 1)
 rstan::traceplot(simulated_fit, 'lp__')
-rstan::traceplot(simulated_fit, 'beta')
-  
-# if (interactive())
-#   shinystan::launch_shinystan(simulated_fit)
-  
-  
+rstan::traceplot(simulated_fit, 'beta_bg')
+if (interactive())
+  shinystan::launch_shinystan(simulated_fit)
 #---Review posterior distribution of beta parameters--#
-
-
-pp_beta1 <- rstan::extract(simulated_fit,'beta[1]')$beta
-pp_beta2 <- rstan::extract(simulated_fit,'beta[2]')$beta
-
+pp_beta1 <- rstan::extract(simulated_fit,'beta_bg[1]')$beta_bg
+pp_beta2 <- rstan::extract(simulated_fit,'beta_bg[2]')$beta_bg
 ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) + 
   geom_density(aes(x = beta1)) + 
   geom_vline(aes(xintercept = test_beta[1]), colour = 'red') +
   ggtitle('Posterior distribution of beta 1\nshowing true value in red')
-
 ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) + 
   geom_density(aes(x = beta2)) + 
   geom_vline(aes(xintercept = test_beta[2]), colour = 'red') +
   ggtitle('Posterior distribution of beta 2\nshowing true value in red')
-
 ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) + 
   geom_density2d(aes(x = beta1, y = beta2)) +
   geom_point(aes(x = test_beta[1], y = test_beta[2]), colour = 'red', size = 2) +
   ggtitle('Posterior distributions of beta\nshowing true parameter values in red')
-
 #Compute probability of seeing a value beta1 >=1.5
-
 mean(pp_beta1 >= test_beta[1])
-
 #Compute probability of seeing a value beta1 >=-2
-
 mean(pp_beta2 >= test_beta[2])
 #Joint probability
-
-
 mean(pp_beta1 >= test_beta[1] & pp_beta2 >= test_beta[2])
-
 #---Posterior predictive checks---#
-
-pp_beta_bg <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'beta', permuted = TRUE)$beta) 
+pp_beta_bg <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'beta_bg', permuted = TRUE)$beta_bg) 
 pp_lambda <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'baseline', permuted = TRUE)$baseline)
-
 # create list
 pp_beta_bg <-  split(pp_beta_bg, seq(nrow(pp_beta_bg)))
 pp_lambda <-  split(pp_lambda, seq(nrow(pp_lambda)))
-
 pp_newdata <- 
   purrr::pmap(list(pp_beta_bg, pp_lambda),
               function(pp_beta, pp_lambda) {pem_sim_data(lambda = pp_lambda, 
                                            beta = pp_beta,
                                            tau = tau,
                                            n = test_n,
-                                           X = X)
-              } )
-
+                                           X = X_test)} )
 ggplot(pp_newdata %>%
          dplyr::bind_rows() %>%
          dplyr::mutate(type = 'posterior predicted values') %>%
@@ -318,10 +255,7 @@ ggplot(pp_newdata %>%
        , aes(x = os_months, group = os_status, colour = os_status, fill = os_status)) +
   geom_density(alpha = 0.5) +
   facet_wrap(~type, ncol = 1)
-
-
 #--Summarise posterior predictive values
-
 ## ----sim-pp-survdata-----------------------------------------------------
 ## cumulative survival rate for each posterior draw
 pp_survdata <-
@@ -329,7 +263,6 @@ pp_survdata <-
   purrr::map(~ dplyr::mutate(., os_deceased = os_status == 'DECEASED')) %>%
   purrr::map(~ survival::survfit(Surv(os_months, os_deceased) ~ 1, data = .)) %>%
   purrr::map(fortify)
-
 ## summarize cum survival for each unit time (month), summarized at 95% confidence interval
 pp_survdata_agg <- 
   pp_survdata %>%
@@ -359,155 +292,28 @@ ggplot(pp_survdata_agg %>%
          bind_rows(test_data_kmcurve %>% dplyr::mutate(type = 'actual data')),
        aes(x = time, group = type, linetype = type)) + 
   geom_line(aes(y = surv, colour = type)) +
-  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2) +
-  xlim(c(0, 250))
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2) + xlim(c(0,100))
 
-#----Fitting Model to TCGA Glioblastome data----#
-
-#--- Update gen stan data function to include covariates ---#
-
-#--- This function will take a formula object as input --- #
-
-gen_stan_data <- function(data, formula = as.formula(~1)) {
-  if(!inherits(formula, 'formula'))
-    formula <- as.formula(formula)
-  
-  data <- tibble::rownames_to_column(data, var = "id")
-  
-  tau <- data %>% 
-    filter(os_status == "DECEASED") %>%
-    select(os_months) %>% 
-    unlist() %>%
-    unique() %>%
-    sort()
-  
-  if(tau[1] == 0){
-    tau <- c(tau, 12*10^3)
-  } else {
-    tau <- c(0, tau, 12*10^3)
-  }
-  
-  longdata <- tbl_df(survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
-                                  cut = tau,
-                                  data = (data %>%
-                                          mutate(deceased = os_status == "DECEASED"))) %>%
-                                          arrange(id, os_months))
-  
-  #create time point id
-  longdata <- longdata %>%
-    group_by(id) %>%
-    mutate(t = seq(n())) 
-  
-  X_bg <- longdata %>%
-    model.matrix(formula, data = .)
-  
-  M_bg <- ncol(X_bg)
-  
-  if (M_bg > 1){
-    if("(Intercept)" %in% colnames(X_bg))
-      X_bg <- array(X_bg[,-1], dim = c(nrow(longdata), M_bg - 1))
-    M_bg <- ncol(X_bg)
-  }
-  
-  
-  stan_data <- list(
-    N = nrow(longdata),
-    S = dplyr::n_distinct(longdata$id),
-    "T" = dplyr::n_distinct(longdata$t),
-    s = as.numeric(longdata$id),
-    t = longdata$t,
-    M = M_bg,
-    event = longdata$deceased,
-    obs_t = longdata$os_months,
-    x = X_bg
-  )
-}
-
-
-#---Set initial values---#
-tau <- clinical_data %>% filter(os_status == "DECEASED") %>% select(os_months) %>% unlist %>% unique %>%
-  sort()
-
-if(tau[1] == 0){
-  tau <- c(tau, 12*10^3)
-} else {
-  tau <- c(0, tau, 12*10^3)
-}
-
-M = 2
-gen_inits <- function() {
-  list(
-    beta_bg_raw = rnorm(M),
-    tau_s_bg_raw = 0.1*abs(rnorm(1)),
-    tau_bg_raw = abs(rnorm(M)),
-    c_raw = abs(rnorm(1)),
-    r_raw = abs(rnorm(1)),
-    baseline = rgamma(n = n_distinct(diff(tau)), shape = exp(3), scale = 0.1)
-    
-  )
-}
-
-
-#-----Run Stan-------#
-nChain <- 1
-stanfile <- 'pem_bg.stan'
-rstan_options(auto_write = TRUE)
-simulated_fit <- stan(stanfile,
-                      data = gen_stan_data(clinical_data, '~ I(sex == "Male") + age'),
-                      init = gen_inits,
-                      iter = 10,
-                      cores = min(nChain, parallel::detectCores()),
-                      seed = 7327,
-                      chains = nChain,
-                      control = list(adapt_delta = 0.99, max_treedepth = 15)
-)
-
-
-###########
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+#----Wrap as a function----#
 pp_predict_surv <- function(pp_beta, pp_lambda, n, tau, X,
                             level = 0.9, 
                             plot = F, data = NULL,
-                            sim_data_fun = pem_sim_data
-) {
+                            sim_data_fun = pem_sim_data) {
   pp_newdata <- 
-    purrr::pmap(list(pp_beta, pp_lambda),
+    purrr::pmap(list(pp_lambda, pp_beta),
                 function(a, b) {pem_sim_data(lambda = a, 
                                              beta = b,
                                              tau = tau,
                                              n = n,
-                                             X = X)
-                } )
-  
+                                             X = X)} )
   pp_survdata <-
     pp_newdata %>%
     purrr::map(~ dplyr::mutate(., os_deceased = os_status == 'DECEASED')) %>%
     purrr::map(~ survival::survfit(Surv(os_months, os_deceased) ~ 1, data = .)) %>%
     purrr::map(fortify)
-  
   ## compute quantiles given level 
   lower_p <- 0 + ((1 - level)/2)
   upper_p <- 1 - ((1 - level)/2)
-  
   pp_survdata_agg <- 
     pp_survdata %>%
     purrr::map(~ dplyr::mutate(.,
@@ -519,20 +325,16 @@ pp_predict_surv <- function(pp_beta, pp_lambda, n, tau, X,
                      , surv_lower = quantile(surv,
                                              probs = lower_p)
                      , surv_upper = quantile(surv,
-                                             probs = upper_p)
-    ) %>%
+                                             probs = upper_p) ) %>%
     dplyr::ungroup()
-  
   if (plot == FALSE) {
     return(pp_survdata_agg)
   } 
-  
   ggplot_data <- pp_survdata_agg %>%
     dplyr::mutate(type = 'posterior predicted values') %>%
     dplyr::rename(surv = surv_p50,
                   lower = surv_lower,
                   upper = surv_upper, time = time_group)
-  
   if (!is.null(data))
     ggplot_data <- 
     ggplot_data %>% 
@@ -542,12 +344,9 @@ pp_predict_surv <- function(pp_beta, pp_lambda, n, tau, X,
           Surv(os_months, os_deceased) ~ 1, 
           data = data %>% 
             dplyr::mutate(
-              os_deceased = os_status == 'DECEASED')
-        )) %>%
+              os_deceased = os_status == 'DECEASED') )) %>%
         dplyr::mutate(lower = surv,
-                      upper = surv, type = 'actual data')
-    )
-  
+                      upper = surv, type = 'actual data') )
   pl <- ggplot(ggplot_data,
                aes(x = time, group = type, linetype = type)) + 
     geom_line(aes(y = surv, colour = type)) +
@@ -556,5 +355,134 @@ pp_predict_surv <- function(pp_beta, pp_lambda, n, tau, X,
   pl 
 }
 
+#----Fitting Model to TCGA Glioblastome data----#
+
+#--- Update gen stan data function to include covariates. This function will take a formula object as input --- #
+gen_stan_data <- function(data, formula = as.formula(~1)) {
+  if(!inherits(formula, 'formula'))
+    formula <- as.formula(formula)
+  #set the tau interval times
+  tau <- data %>% select(os_months) %>% unlist %>% unique %>% sort()
+  if(tau[1] != 0){
+    tau <- c(0, tau)
+  }
+  longdata <- survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
+                                  cut = tau, data = (data %>%
+                                  mutate(deceased = os_status == "DECEASED")))
+  #create time point id
+  longdata <- longdata %>%
+    group_by(sample_id) %>%
+    mutate(t_id = seq(n())) %>%
+    ungroup()
+  t_obs <- data %>% select(os_months) %>% unlist %>% unique %>% sort()
+  t_dur <- diff(tau)
+  X_bg <- longdata %>%
+    model.matrix(formula, data = .)
+  M_bg <- ncol(X_bg)
+  if (M_bg > 1){
+    if("(Intercept)" %in% colnames(X_bg))
+      X_bg <- array(X_bg[,-1], dim = c(nrow(longdata), M_bg - 1))
+    M_bg <- ncol(X_bg)
+  }
+  stan_data <- list(
+    N = nrow(longdata),
+    S = length(unique(longdata$num_id)),
+    "T" = dplyr::n_distinct(longdata$t_id),
+    s = as.integer(longdata$num_id),
+    t_obs = t_obs,
+    t_dur = t_dur,
+    M=M,
+    event = as.integer(longdata$deceased),
+    t = longdata$t_id,
+    x = X_bg
+  )
+}
+#---Set initial values---#
+gen_inits <-  function(M) {
+  function() 
+    list(
+      beta_bg_raw = array(rnorm(M), dim =M),
+      tau_s_bg_raw = 0.1*abs(rnorm(1)),
+      tau_bg_raw = array(abs(rnorm(M)), dim = M),
+      c_raw = abs(rnorm(1)),
+      r_raw = abs(rnorm(1)),
+      baseline = rgamma(n = length(diff(tau)), shape =  mean(diff(tau)) * 0.1, scale = 0.01)
+    )
+}
+#-----Covariates-----#
+#Create dummy vars
+clinical_data <- clinical_data %>%
+  filter(!is.na(karnofsky_performance_score)) %>% #clean data
+  select(karnofsky_performance_score, os_months, os_status)
+clinical_data$karnofsky_performance_score <- as.factor(clinical_data$karnofsky_performance_score)
+Xdummies <- caret::dummyVars(Surv(os_months, os_deceased) ~ karnofsky_performance_score,
+                      data =  clinical_data %>%
+                        mutate(os_deceased = (os_status == "DECEASED")))
+X <- tbl_df(predict(Xdummies, newdata =  clinical_data %>%
+                      mutate(os_deceased = (os_status == "DECEASED"))))
+#Near Zero Variance Predictors
+nzv <- caret::nearZeroVar(X, saveMetrics= TRUE)
+nzv[nzv$nzv,]
+#joint covariates lower than 60
+X <- X %>% mutate(kpsless_or60 = (karnofsky_performance_score.40 | karnofsky_performance_score.60)) %>%
+  rename(kps80 = karnofsky_performance_score.80, kps100 = karnofsky_performance_score.100) %>%
+  select(-karnofsky_performance_score.40, -karnofsky_performance_score.60) %>%
+  mutate_all(funs(as.integer))
+#Double check near Zero Variance Predictors
+nzv <- caret::nearZeroVar(X, saveMetrics= TRUE)
+nzv[nzv$nzv,]
+#-----Run Stan-------#
+nChain <- 1
+stanfile <- 'pem_bg.stan'
+rstan_options(auto_write = TRUE)
+pem_fit <- stan(stanfile,
+                      data = gen_stan_data(clinical_data, '~ kps100 + kps80 + kpsless_or60'),
+                      init = gen_inits(M=3),
+                      iter = 400,
+                      cores = min(nChain, parallel::detectCores()),
+                      seed = 7327,
+                      chains = nChain,        
+                      #control = list(adapt_delta = 0.99, max_treedepth = 15)
+                      pars = c("beta_bg", "baseline", "lp__"))
+###########
+#----Convergence review -----#
+print(pem_fit, pars = c("baseline"))
+pairs(pem_fit, pars = c("lp__", "beta_bg"), las = 1)
+rstan::traceplot(pem_fit, 'lp__')
+rstan::traceplot(pem_fit, 'beta_bg')
+if (interactive())
+  shinystan::launch_shinystan(simulated_fit)
+
+###########
+#-----Posteriro predictive check-----#
+pp_baseline <- rstan::extract(pem_fit,'baseline')$baseline
+pp_beta <- rstan::extract(pem_fit, 'beta_bg')$beta_bg
+pp_baseline <-  split(pp_baseline, seq(nrow(pp_baseline)))
+pp_beta <-  split(pp_beta, seq(nrow(pp_beta)))
+
+#Create dummy vars
+Xdummies <- dummyVars(Surv(os_months, os_deceased) ~ age +
+                        g.cimp_methylation + idh1_status +
+                        mgmt_status, data =  glio_clin_dat %>%
+                        mutate(os_deceased = (os_status == "DECEASED")))
+X <- tbl_df(predict(Xdummies, newdata =  glio_clin_dat %>%
+                      mutate(os_deceased = (os_status == "DECEASED"))))
+names(X)<- stringr::str_replace_all(names(X), "-", "")
+names(X) <- tolower(names(X))
+
+tau <- data %>% select(os_months) %>% unlist %>% unique %>% sort()
+
+pl <- pp_predict_surv(pp_beta = pp_beta,
+                      pp_lambda = pp_baseline,
+                      n = nrow(clinical_data),
+                      tau = clinical_data %>% select(os_months) %>% unlist %>% unique %>% sort(),
+                      X = X,
+                      level = 0.9, 
+                      plot = T, 
+                      data = clinical_data) 
+pl + 
+  xlim(NA, 250) +
+  ggtitle('Posterior predictive checks \nfit to GBC 2008 historical cohort; showing 90% CI')
+ 
 
 
