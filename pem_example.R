@@ -14,6 +14,8 @@ require(ggfortify)
 theme_set(theme_bw())
 library(VIM)
 library(caret)
+library(mice)
+library(missMDA)
 #---Download Data----#
 mycgds = CGDS("http://www.cbioportal.org/public-portal/")
 study_list = getCancerStudies(mycgds)
@@ -37,8 +39,6 @@ convert_blank_to_na <- function(x) {
 clinical_data <- clinical_data %>%
   dplyr::mutate_all(funs(convert_blank_to_na))
 #--Missing Data ---#
-clinical_data %>%
-  VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
 clinical_data %>% 
   filter(is.na(os_status) | os_status == "") %>%
   select(os_months, os_status) %>%
@@ -47,14 +47,6 @@ clinical_data %>%
   filter(is.na(os_status) | os_status == "" |os_months < 0 | is.na(os_months)) %>%
   select(os_months, os_status) %>%
   glimpse
-#--- Remove Missing Obs ---#
-short_clin_dat <- 
-  clinical_data %>% 
-  filter(!is.na(os_status) & os_status != "" )
-#confirm 44 fewer observations
-assertthat::assert_that(nrow(short_clin_dat) == (nrow(clinical_data) - 44))
-clinical_data <- tbl_df(short_clin_dat)
-remove(short_clin_dat)
 clinical_data %>%
   VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
 #--- Distribution event times ---#
@@ -153,7 +145,8 @@ autoplot(survival::survfit(Surv(os_months, os_deceased) ~ 1,
 #------ long data format ----#
 #set the tau interval times
 tau <- sim_data %>% select(os_months) %>% unlist %>% unique %>% sort()
-longdata <- survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
+longdata <- survival::survSplit(Surv(time = os_months, 
+                                     event = deceased) ~ . , 
                                 cut = tau, data = (sim_data %>%
                                 mutate(deceased = os_status == "DECEASED")))
 
@@ -356,7 +349,67 @@ pp_predict_surv <- function(pp_beta, pp_lambda, n, tau, X,
 }
 
 #----Fitting Model to TCGA Glioblastome data----#
+#-----Covariates-----#
+#Create dummy vars
+clinical_data$karnofsky_performance_score <- as.factor(clinical_data$karnofsky_performance_score)
+Xdummies <- caret::dummyVars(Surv(os_months, os_deceased) ~ karnofsky_performance_score,
+                             data =  clinical_data %>%
+                               mutate(os_deceased = (os_status == "DECEASED")))
+X <- tbl_df(predict(Xdummies, newdata =  clinical_data %>%
+                      mutate(os_deceased = (os_status == "DECEASED"))))
 
+#Think about imputation
+pMiss <- function(x){sum(is.na(x))/length(x)*100}
+apply(clinical_data %>% select(karnofsky_performance_score), 2, pMiss)
+#we can discard the missing observations but is more than 5% thus by the rule of thumb is better to find an imputation strategy
+clinical_data <- clinical_data %>%
+  filter(!is.na(karnofsky_performance_score))  #clean data
+#special boxplot
+VIM::marginplot(clinical_data[c(1,2)])
+#using imputation by Bayesian logistic regression
+tempData <- mice(clinical_data,m=5,maxit=50,meth='pmm',seed=500)
+summary(tempData)
+tmp <- as.list(X)
+lapply(tmp, function(x){
+  mice.impute.logreg.boot( 
+    y = as.vector(x),
+    ry = !is.na(clinical_data$karnofsky_performance_score),
+    x = model.matrix(~ prior_glioma + sex + treatment_status +
+                       pretreatment_history + os_months + os_status,
+                     data = clinical_data)[,-1])
+})
+#or using bagged trees
+X <- X %>% cbind(clinical_data %>% select(prior_glioma, sex,
+                                          treatment_status, 
+                        pretreatment_history, os_months, os_status))
+preProc <- caret::preProcess(X, method = c("bagImpute"))
+X <- predict(preProc, X, na.action = na.pass)
+X <- X %>% 
+  select(dplyr::contains("karnofsky_performance_score")) %>% round()
+# or multiple imputation
+nb <- missMDA::estim_ncpMCA(as.data.frame(
+  clinical_data %>%
+  select(karnofsky_performance_score, os_status) %>%
+    mutate_all(funs(as.factor))),
+                            ncp.max=5) ## Time-consuming, nb = 4
+
+# the bagged trees may be prefered for its computational efficiency
+
+#Near Zero Variance Predictors
+nzv <- caret::nearZeroVar(X, saveMetrics= TRUE)
+nzv[nzv$nzv,]
+#joint covariates lower than 60
+X <- X %>% mutate(kpsless_or60 = (karnofsky_performance_score.40 | karnofsky_performance_score.60)) %>%
+  rename(kps80 = karnofsky_performance_score.80, kps100 = karnofsky_performance_score.100) %>%
+  select(-karnofsky_performance_score.40, -karnofsky_performance_score.60) %>%
+  mutate_all(funs(as.integer))
+#Double check near Zero Variance Predictors
+nzv <- caret::nearZeroVar(X, saveMetrics= TRUE)
+nzv[nzv$nzv,]
+
+clinical_data <- clinical_data %>%
+  select(sample_id, num_id, os_months, os_status) %>%
+  cbind(X)
 #--- Update gen stan data function to include covariates. This function will take a formula object as input --- #
 gen_stan_data <- function(data, formula = as.formula(~1)) {
   if(!inherits(formula, 'formula'))
@@ -366,7 +419,8 @@ gen_stan_data <- function(data, formula = as.formula(~1)) {
   if(tau[1] != 0){
     tau <- c(0, tau)
   }
-  longdata <- survival::survSplit(Surv(time = os_months, event = deceased) ~ . , 
+  longdata <- survival::survSplit(Surv(time = os_months,
+                                       event = deceased) ~ . , 
                                   cut = tau, data = (data %>%
                                   mutate(deceased = os_status == "DECEASED")))
   #create time point id
@@ -391,7 +445,7 @@ gen_stan_data <- function(data, formula = as.formula(~1)) {
     s = as.integer(longdata$num_id),
     t_obs = t_obs,
     t_dur = t_dur,
-    M=M,
+    M = M_bg,
     event = as.integer(longdata$deceased),
     t = longdata$t_id,
     x = X_bg
@@ -409,40 +463,21 @@ gen_inits <-  function(M) {
       baseline = rgamma(n = length(diff(tau)), shape =  mean(diff(tau)) * 0.1, scale = 0.01)
     )
 }
-#-----Covariates-----#
-#Create dummy vars
-clinical_data <- clinical_data %>%
-  filter(!is.na(karnofsky_performance_score)) %>% #clean data
-  select(karnofsky_performance_score, os_months, os_status)
-clinical_data$karnofsky_performance_score <- as.factor(clinical_data$karnofsky_performance_score)
-Xdummies <- caret::dummyVars(Surv(os_months, os_deceased) ~ karnofsky_performance_score,
-                      data =  clinical_data %>%
-                        mutate(os_deceased = (os_status == "DECEASED")))
-X <- tbl_df(predict(Xdummies, newdata =  clinical_data %>%
-                      mutate(os_deceased = (os_status == "DECEASED"))))
-#Near Zero Variance Predictors
-nzv <- caret::nearZeroVar(X, saveMetrics= TRUE)
-nzv[nzv$nzv,]
-#joint covariates lower than 60
-X <- X %>% mutate(kpsless_or60 = (karnofsky_performance_score.40 | karnofsky_performance_score.60)) %>%
-  rename(kps80 = karnofsky_performance_score.80, kps100 = karnofsky_performance_score.100) %>%
-  select(-karnofsky_performance_score.40, -karnofsky_performance_score.60) %>%
-  mutate_all(funs(as.integer))
-#Double check near Zero Variance Predictors
-nzv <- caret::nearZeroVar(X, saveMetrics= TRUE)
-nzv[nzv$nzv,]
+
 #-----Run Stan-------#
-nChain <- 1
+nChain <- 4
 stanfile <- 'pem_bg.stan'
 rstan_options(auto_write = TRUE)
 pem_fit <- stan(stanfile,
-                      data = gen_stan_data(clinical_data, '~ kps100 + kps80 + kpsless_or60'),
+                      data = gen_stan_data(clinical_data,
+                                           '~ kpsless_or60 + 
+                                           kps80 + kps100'),
                       init = gen_inits(M=3),
-                      iter = 400,
+                      iter = 250,
                       cores = min(nChain, parallel::detectCores()),
                       seed = 7327,
-                      chains = nChain,        
-                      #control = list(adapt_delta = 0.99, max_treedepth = 15)
+                #control = list(adapt_delta = 0.99, max_treedepth = 15
+                      chains = nChain,
                       pars = c("beta_bg", "baseline", "lp__"))
 ###########
 #----Convergence review -----#
@@ -484,5 +519,10 @@ pl +
   xlim(NA, 250) +
   ggtitle('Posterior predictive checks \nfit to GBC 2008 historical cohort; showing 90% CI')
  
+
+rcorr.cens(age, Surv(d.time, death))
+r <- rcorrcens(Surv(d.time, death) ~ age + bp)
+r
+plot(r)
 
 
