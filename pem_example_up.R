@@ -69,8 +69,8 @@ plot(sfun,  main = "Step function of PEM", xlab = "time (months)", ylab = "basel
 stanfile <- "'pem_biostan.stan'"
 #biostan::print_stan_file(stanfile)
 #or open stan file
-if (interactive())
-  file.edit(stanfile)
+#if (interactive())
+  #file.edit(stanfile)
 #---Testing the model on simulated data---#
 pem_sim_data <- function(n, tau, beta, lambda, X, ...){
   #format check
@@ -111,7 +111,7 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
     mutate(os_status = ifelse(is.na(surv_months), 'LIVING', 'DECEASED'),
            surv_months = ifelse(is.na(surv_months), tau[length(tau)], surv_months),
            id = seq(n), 
-           censor_months = rexp(n = n, rate = 1/100))   %>% #censoring rate
+           censor_months = rexp(n, rate = 1/100))   %>% #censoring rate
     dplyr::mutate(os_status = ifelse(surv_months < censor_months & os_status != 'LIVING',
                                      'DECEASED', 'LIVING'
     ),
@@ -121,12 +121,12 @@ pem_sim_data <- function(n, tau, beta, lambda, X, ...){
     ) %>%   cbind(X) #joint covariates
   return(sim.data)
 }
-set.seed(342)
+set.seed(34191)
 test_n = 100
 test_tau = c(seq(0, 1200, length.out = test_n))
 test_baseline <- exp(-3)*runif(test_n - 1 , 0, 1)
 X_test = matrix(c(rnorm(100), sample(c(0,1), 100, replace = T)), ncol=2)
-test_beta = c(0.5, 1)
+test_beta = c(2, -1)
 sim_data <-  pem_sim_data( beta = test_beta,
                            X = X_test,
                            tau = test_tau,
@@ -145,9 +145,14 @@ autoplot(survival::survfit(Surv(os_months, os_deceased) ~ 1,
 #------ long data format ----#
 #set the tau interval times
 tau <- sim_data %>% select(os_months) %>% unlist %>% unique %>% sort()
+if(tau[1] != 0){
+  tau <- c(0, tau)
+}
+#create longdata
 longdata <- survival::survSplit(Surv(time = os_months, 
                                      event = deceased) ~ . , 
-                                cut = tau, data = (sim_data %>%
+                                cut = tau,
+                                data = (sim_data %>%
                                 mutate(deceased = os_status == "DECEASED")))
 
 #create time point id
@@ -156,7 +161,7 @@ longdata <- longdata %>%
   group_by(id) %>%
   mutate(t_id = seq(n())) %>%
   ungroup()
-t_obs <- sim_data %>% select(os_months) %>% unlist %>% unique %>% sort()
+# t_obs <- sim_data %>% select(os_months) %>% unlist %>% unique %>% sort()
 t_dur <- diff(tau)
 #----Generate stan data----#
 M = length(test_beta)
@@ -166,16 +171,15 @@ gen_stan_data <- function(data){
     S = length(unique(longdata$id)),
     "T" = dplyr::n_distinct(data$t_id),
     s = array(as.integer(data$id)),
-    t_obs = t_obs,
     t_dur = t_dur,
     M=M,
-    event = as.integer(data$deceased),
+    status = as.integer(data$deceased),
     t = data$t_id,
     x = array(matrix(c(data$continuos, data$discrete), ncol=M), dim=c(nrow(data), M))
   )
 }
 #---Set initial values---#
-gen_inits <-  function(M) {
+gen_inits <- function(M) {
   function() 
   list(
     beta_bg_raw = rnorm(M),
@@ -183,17 +187,18 @@ gen_inits <-  function(M) {
     tau_bg_raw = abs(rnorm(M)),
     c_raw = abs(rnorm(1)),
     r_raw = abs(rnorm(1)),
-    baseline = rgamma(n = length(diff(tau)), shape =  mean(diff(tau)) * 0.1, scale = 0.01)
+    baseline = rgamma(n = length(diff(tau)), shape = 0.01, scale = 0.1)
+    
   )
 }
-#-----Run Stan-------#
+#----Run Stan-------#
 nChain <- 1
 stanfile <- 'pem_bg.stan'
 rstan_options(auto_write = TRUE)
 simulated_fit <- stan(stanfile,
                       data = gen_stan_data(longdata),
                       init = gen_inits(M=2),
-                      iter = 1000,
+                      iter = 1200,
                       cores = min(nChain, parallel::detectCores()),
                       seed = 7327,
                       chains = nChain,
@@ -203,10 +208,16 @@ simulated_fit <- stan(stanfile,
 #----Convergence review -----#
 print(simulated_fit)
 pairs(simulated_fit, pars = c("lp__", "beta_bg"), las = 1)
-rstan::traceplot(simulated_fit, 'lp__')
+rstan::traceplot(simulated_fit, c('lp__', 'beta_bg'))
 rstan::traceplot(simulated_fit, 'beta_bg')
+# params_cp <- as.data.frame(extract(simulated_fit, permuted=FALSE))
+# names(params_cp) <- gsub("chain:1.", "", names(params_cp), fixed = TRUE)
+# names(params_cp) <- gsub("[", ".", names(params_cp), fixed = TRUE)
+# names(params_cp) <- gsub("]", "", names(params_cp), fixed = TRUE)
+# params_cp$iter <- 1:500
 if (interactive())
   shinystan::launch_shinystan(simulated_fit)
+
 #---Review posterior distribution of beta parameters--#
 pp_beta1 <- rstan::extract(simulated_fit,'beta_bg[1]')$beta_bg
 pp_beta2 <- rstan::extract(simulated_fit,'beta_bg[2]')$beta_bg
@@ -230,7 +241,8 @@ mean(pp_beta2 >= test_beta[2])
 mean(pp_beta1 >= test_beta[1] & pp_beta2 >= test_beta[2])
 #---Posterior predictive checks---#
 pp_beta_bg <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'beta_bg', permuted = TRUE)$beta_bg) 
-pp_lambda <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'baseline', permuted = TRUE)$baseline)
+pp_lambda <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'log_baseline', permuted = TRUE)$log_baseline)
+pp_lambda <- apply(pp_lambda, 2, exp)
 # create list
 pp_beta_bg <-  split(pp_beta_bg, seq(nrow(pp_beta_bg)))
 pp_lambda <-  split(pp_lambda, seq(nrow(pp_lambda)))
@@ -286,6 +298,65 @@ ggplot(pp_survdata_agg %>%
        aes(x = time, group = type, linetype = type)) + 
   geom_line(aes(y = surv, colour = type)) +
   geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2) + xlim(c(0,100))
+
+
+#----Model reparameterisation----#
+#----Generate stan data----#
+M = length(test_beta)
+gen_stan_data <- function(data){
+  stan_data <- list(
+    N = nrow(data),
+    S = length(unique(longdata$id)),
+    "T" = dplyr::n_distinct(data$t_id),
+    s = array(as.integer(data$id)),
+    log_t_dur = array(log(t_dur), dim = length(t_dur)),
+    M=M,
+    status = as.integer(data$deceased),
+    t = data$t_id,
+    x = array(matrix(c(data$continuos, data$discrete), ncol=M), dim=c(nrow(data), M))
+  )
+}
+#---Set initial values---#
+gen_inits <- function(M) {
+  function() 
+    list(
+      log_baseline_raw = rnorm(n= length(t_dur)),
+      sigma_baseline = runif(1, 0.01, 100),
+      log_baseline_mu = rnorm(1),
+      beta_bg_raw = rnorm(M),
+      tau_s_bg_raw = 0.1*abs(rnorm(1)),
+      tau_bg_raw = abs(rnorm(M))
+    )
+}
+#-----Run Stan-------#
+nChain <- 2
+stanfile <- 'pem_bg_up.stan'
+rstan_options(auto_write = TRUE)
+test_simulated <- stan(stanfile,
+                      data = gen_stan_data(longdata),
+                      init = gen_inits(M=2),
+                      iter = 1000,
+                      cores = min(nChain, parallel::detectCores()),
+                      seed = 7327,
+                      chains = nChain,
+                    #  control = list(adapt_delta = 0.95),
+                     pars = c("beta_bg", "log_baseline", "lp__")
+)
+nChain <- 2
+simulated_fit2 <- stan(stanfile,
+                       data = gen_stan_data(longdata),
+                       init = gen_inits(M=2),
+                       iter = 2000,
+                       cores = min(nChain, parallel::detectCores()),
+                       seed = 7327,
+                       chains = nChain,
+                       control = list(adapt_delta = 0.9),
+                       pars = c("beta_bg", "log_baseline", "lp__")
+)
+if (interactive())
+  shinystan::launch_shinystan(simulated_fit)
+#----Convergence review -----#
+print(simulated_fit)
 
 #----Wrap as a function----#
 pp_predict_surv <- function(pp_beta, pp_lambda, n, tau, X,
@@ -350,6 +421,39 @@ pp_predict_surv <- function(pp_beta, pp_lambda, n, tau, X,
 
 #----Fitting Model to TCGA Glioblastome data----#
 #-----Covariates-----#
+#we can discard the missing observations
+clinical_data <- clinical_data %>%
+  filter(!is.na(karnofsky_performance_score))  #clean data
+#Think about imputation, the NA is more than 5% thus by the rule of thumb is better to find an imputation strategy
+pMiss <- function(x){sum(is.na(x))/length(x)*100}
+apply(clinical_data %>% select(karnofsky_performance_score), 2, pMiss)
+#special boxplot
+VIM::marginplot(clinical_data[c("os_months","karnofsky_performance_score")])
+#using imputation by Bayesian poly regression
+tmp <- as.factor(clinical_data$karnofsky_performance_score)
+tmp <- mice::mice.impute.polyreg(y = tmp, 
+                                 ry = !is.na(tmp),
+                                 x = model.matrix(~ prior_glioma + treatment_status +
+                                                    pretreatment_history + os_months,
+                                                  data = clinical_data)[,-1],
+                                 wy = array(TRUE, dim = length(tmp)))
+clinical_data$karnofsky_performance_score[is.na(clinical_data$karnofsky_performance_score)] <- tmp[is.na(clinical_data$karnofsky_performance_score)]
+remove(tmp)
+# #or using bagged trees
+# X <- X %>% cbind(clinical_data %>% select(prior_glioma, sex,
+#                                           treatment_status, 
+#                                           pretreatment_history, os_months, os_status))
+# preProc <- caret::preProcess(X, method = c("bagImpute"))
+# X <- predict(preProc, X, na.action = na.pass)
+# X <- X %>% 
+#   select(dplyr::contains("karnofsky_performance_score")) 
+# # or multiple imputation
+# nb <- missMDA::estim_ncpMCA(as.data.frame(
+#   clinical_data %>%
+#     select(karnofsky_performance_score, os_status) %>%
+#     mutate_all(funs(as.factor))),
+#   ncp.max=5) ## Time-consuming, nb = 4
+
 #Create dummy vars
 clinical_data$karnofsky_performance_score <- as.factor(clinical_data$karnofsky_performance_score)
 Xdummies <- caret::dummyVars(Surv(os_months, os_deceased) ~ karnofsky_performance_score,
@@ -357,44 +461,6 @@ Xdummies <- caret::dummyVars(Surv(os_months, os_deceased) ~ karnofsky_performanc
                                mutate(os_deceased = (os_status == "DECEASED")))
 X <- tbl_df(predict(Xdummies, newdata =  clinical_data %>%
                       mutate(os_deceased = (os_status == "DECEASED"))))
-
-#Think about imputation
-pMiss <- function(x){sum(is.na(x))/length(x)*100}
-apply(clinical_data %>% select(karnofsky_performance_score), 2, pMiss)
-#we can discard the missing observations but is more than 5% thus by the rule of thumb is better to find an imputation strategy
-clinical_data <- clinical_data %>%
-  filter(!is.na(karnofsky_performance_score))  #clean data
-#special boxplot
-VIM::marginplot(clinical_data[c(1,2)])
-#using imputation by Bayesian logistic regression
-tempData <- mice(clinical_data,m=5,maxit=50,meth='pmm',seed=500)
-summary(tempData)
-tmp <- as.list(X)
-lapply(tmp, function(x){
-  mice.impute.logreg.boot( 
-    y = as.vector(x),
-    ry = !is.na(clinical_data$karnofsky_performance_score),
-    x = model.matrix(~ prior_glioma + sex + treatment_status +
-                       pretreatment_history + os_months + os_status,
-                     data = clinical_data)[,-1])
-})
-#or using bagged trees
-X <- X %>% cbind(clinical_data %>% select(prior_glioma, sex,
-                                          treatment_status, 
-                        pretreatment_history, os_months, os_status))
-preProc <- caret::preProcess(X, method = c("bagImpute"))
-X <- predict(preProc, X, na.action = na.pass)
-X <- X %>% 
-  select(dplyr::contains("karnofsky_performance_score")) %>% round()
-# or multiple imputation
-nb <- missMDA::estim_ncpMCA(as.data.frame(
-  clinical_data %>%
-  select(karnofsky_performance_score, os_status) %>%
-    mutate_all(funs(as.factor))),
-                            ncp.max=5) ## Time-consuming, nb = 4
-
-# the bagged trees may be prefered for its computational efficiency
-
 #Near Zero Variance Predictors
 nzv <- caret::nearZeroVar(X, saveMetrics= TRUE)
 nzv[nzv$nzv,]
@@ -406,10 +472,14 @@ X <- X %>% mutate(kpsless_or60 = (karnofsky_performance_score.40 | karnofsky_per
 #Double check near Zero Variance Predictors
 nzv <- caret::nearZeroVar(X, saveMetrics= TRUE)
 nzv[nzv$nzv,]
-
+#Create dataset and data partition
 clinical_data <- clinical_data %>%
   select(sample_id, num_id, os_months, os_status) %>%
   cbind(X)
+set.seed(111) #this split will randomly select 80% of the data
+tmp <- createDataPartition(y = clinical_data$os_status, p=0.8, list = FALSE)
+train <- clinical_data[tmp,]
+test <- clinical_data[-tmp]
 #--- Update gen stan data function to include covariates. This function will take a formula object as input --- #
 gen_stan_data <- function(data, formula = as.formula(~1)) {
   if(!inherits(formula, 'formula'))
@@ -443,45 +513,48 @@ gen_stan_data <- function(data, formula = as.formula(~1)) {
     S = length(unique(longdata$num_id)),
     "T" = dplyr::n_distinct(longdata$t_id),
     s = as.integer(longdata$num_id),
-    t_obs = t_obs,
-    t_dur = t_dur,
+    log_t_dur = array(log(t_dur), dim = length(t_dur)),
     M = M_bg,
-    event = as.integer(longdata$deceased),
+    status = as.integer(longdata$deceased),
     t = longdata$t_id,
     x = X_bg
   )
 }
 #---Set initial values---#
-gen_inits <-  function(M) {
+gen_inits <- function(M, data) {
+  tau <- data %>% select(os_months) %>% unlist %>% unique %>% sort()
+  if(tau[1] != 0){
+    tau <- c(0, tau)
+  }
+  t_dur <- diff(tau)
   function() 
     list(
-      beta_bg_raw = array(rnorm(M), dim =M),
+      log_baseline_raw = rnorm(n= length(t_dur)),
+      sigma_baseline = runif(1, 0.01, 100),
+      log_baseline_mu = rnorm(1),
+      beta_bg_raw = rnorm(M),
       tau_s_bg_raw = 0.1*abs(rnorm(1)),
-      tau_bg_raw = array(abs(rnorm(M)), dim = M),
-      c_raw = abs(rnorm(1)),
-      r_raw = abs(rnorm(1)),
-      baseline = rgamma(n = length(diff(tau)), shape =  mean(diff(tau)) * 0.1, scale = 0.01)
+      tau_bg_raw = abs(rnorm(M))
     )
 }
-
 #-----Run Stan-------#
-nChain <- 4
-stanfile <- 'pem_bg.stan'
+nChain <- 1
+stanfile <- 'pem_bg_up.stan'
 rstan_options(auto_write = TRUE)
 pem_fit <- stan(stanfile,
-                      data = gen_stan_data(clinical_data,
+                      data = gen_stan_data(train,
                                            '~ kpsless_or60 + 
                                            kps80 + kps100'),
-                      init = gen_inits(M=3),
-                      iter = 250,
+                      init = gen_inits(M=3, train),
+                      iter = 1000,
                       cores = min(nChain, parallel::detectCores()),
                       seed = 7327,
                 #control = list(adapt_delta = 0.99, max_treedepth = 15
                       chains = nChain,
-                      pars = c("beta_bg", "baseline", "lp__"))
+                      pars = c("beta_bg", "log_baseline", "lp__"))
 ###########
 #----Convergence review -----#
-print(pem_fit, pars = c("baseline"))
+print(pem_fit)
 pairs(pem_fit, pars = c("lp__", "beta_bg"), las = 1)
 rstan::traceplot(pem_fit, 'lp__')
 rstan::traceplot(pem_fit, 'beta_bg')
@@ -490,31 +563,24 @@ if (interactive())
 
 ###########
 #-----Posteriro predictive check-----#
-pp_baseline <- rstan::extract(pem_fit,'baseline')$baseline
-pp_beta <- rstan::extract(pem_fit, 'beta_bg')$beta_bg
-pp_baseline <-  split(pp_baseline, seq(nrow(pp_baseline)))
-pp_beta <-  split(pp_beta, seq(nrow(pp_beta)))
+pp_beta_bg <- as.data.frame.array(rstan::extract(pem_fit,pars = 'beta_bg', permuted = TRUE)$beta_bg) 
+pp_lambda <- as.data.frame.array(rstan::extract(pem_fit,pars = 'log_baseline', permuted = TRUE)$log_baseline)
+pp_lambda <- apply(pp_lambda, 2, exp)
+# create list
+pp_beta_bg <-  split(pp_beta_bg, seq(nrow(pp_beta_bg)))
+pp_lambda <-  split(pp_lambda, seq(nrow(pp_lambda)))
 
 #Create dummy vars
-Xdummies <- dummyVars(Surv(os_months, os_deceased) ~ age +
-                        g.cimp_methylation + idh1_status +
-                        mgmt_status, data =  glio_clin_dat %>%
-                        mutate(os_deceased = (os_status == "DECEASED")))
-X <- tbl_df(predict(Xdummies, newdata =  glio_clin_dat %>%
-                      mutate(os_deceased = (os_status == "DECEASED"))))
-names(X)<- stringr::str_replace_all(names(X), "-", "")
-names(X) <- tolower(names(X))
-
-tau <- data %>% select(os_months) %>% unlist %>% unique %>% sort()
-
-pl <- pp_predict_surv(pp_beta = pp_beta,
-                      pp_lambda = pp_baseline,
-                      n = nrow(clinical_data),
-                      tau = clinical_data %>% select(os_months) %>% unlist %>% unique %>% sort(),
+X <- as.matrix(train[,5:7])
+tau <- train %>% select(os_months) %>% unlist %>% unique %>% sort()
+pl <- pp_predict_surv(pp_beta = pp_beta_bg,
+                      pp_lambda = pp_lambda,
+                      n = nrow(train),
+                      tau = train %>% select(os_months) %>% unlist %>% unique %>% sort(),
                       X = X,
                       level = 0.9, 
                       plot = T, 
-                      data = clinical_data) 
+                      data = train) 
 pl + 
   xlim(NA, 250) +
   ggtitle('Posterior predictive checks \nfit to GBC 2008 historical cohort; showing 90% CI')

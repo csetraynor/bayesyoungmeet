@@ -41,120 +41,10 @@ In this example we will go over again some points already seen in the vignette A
 
 In this example will be covered the following topics:
 
--Download data from TCGA.
 -Review PEM model.
 -Test PEM model against simulated data.
 -Check convergence and review posterior predictive check on model.
--Fit PEM model with TCGA data.
-
-## Download data
-
-To illustrate the PEM model we will use a datset from The Cancer Genome Atlas (TCGA) in  glioblastome. Glioblastome was the first cancer to be extensively studied by TCGA in this paper from 2008. In 2013, the TCGA published a second paper on TCGA including measurments of new biomarkers. This data is available from the cBioPortal and can be downloaded using the cgdsr package, we will also convert directly the dataset to a manipulable dataframe.
-
-```{r download data}
-mycgds = CGDS("http://www.cbioportal.org/public-portal/")
-study_list = getCancerStudies(mycgds)
-id_sutdy = getCancerStudies(mycgds)[55,1]
-case_list = getCaseLists(mycgds, id_sutdy)[2,1]
-clinical_data <-  tbl_df(getClinicalData(mycgds, case_list)) 
-```
-
-In addition, the new publication have a  pooled population of the previous and current cohorts. This, is a case of historical data, where in a frequentist approach usually the pooling is prefer but in a Bayesian framework a power prior using the 2008 cohort as a historical data may be considered. For now, we will just consider the pooled cohort. We can inspect the dataframe:
-
-```{r inspect dataframe}
-glimpse(clinical_data)
-```
-
-## Data Cleaning
-
-First we will consider to obtain a slightly better manipulable dataset. For example, these steps will convert the rownames to a new colunm id_sample, following the tidy dataset canons, the column names into lower case, and the "" into NA.
-
-```{r data cleaning}
-#
-clinical_data <- clinical_data %>% tibble::rownames_to_column("sample_id") 
-names(clinical_data) <- tolower(names(clinical_data)) 
-#convert missig values into NA
-convert_blank_to_na <- function(x) {
-  if(!purrr::is_character(x)){
-    warning('input variate not character - return original')
-    return(x)
-  } else {
-    ifelse(x == '', NA, x)
-  }
-}
-clinical_data <- clinical_data %>%
-  dplyr::mutate_all(funs(convert_blank_to_na))
-```
-
-Now we can inspect easily the missing data, for example we can plot different combinations of missing values for each covariate using the function aggr form the package VIM.
-
-```{r VIM plot}
-clinical_data %>%
-  VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
-```
-
-Let's consider the overall survival as the response variable. The variable os_months indicated the observed time in mohts, while the variable os_status is a censoring indicator of the observed time being an event or a censored observation. Then given a set of covariates the variables os_status and os_months define the survival outcome. 
-
-## Missing survival times
-
-It is not strange to find in a dataset missing time event or censored values or censoring indicator. We could impute them if we have got covariate values for those individuals. On the other hand, covariate values may also be missing for the same individuals, in that case these observations have to de disregarded. Just for now we will discard these observations.
-
-```{r inspect missing data}
-clinical_data %>% 
-  filter(is.na(os_status) | os_status == "") %>%
-  select(os_months, os_status) %>%
-  glimpse
-```
-
-We have 44 observations where os_status is NA, if we look also at observations where we have missing survival times we will find the same observations:
-
-```{r inspect survival time NA}
-clinical_data %>% 
-  filter(is.na(os_status) | os_status == "" |os_months < 0 | is.na(os_months)) %>%
-  select(os_months, os_status) %>%
-  glimpse
-```
-
-Now we will remove these observations and assert that in fact we have 44 observations less. 
-```{r remove and assert}
-short_clin_dat <- 
-  clinical_data %>% 
-  filter(!is.na(os_status) & os_status != "" )
-
-#confirm 44 fewer observations
-assertthat::assert_that(nrow(short_clin_dat) == (nrow(clinical_data) - 44))
-clinical_data <- tbl_df(short_clin_dat)
-remove(short_clin_dat)
-```
-If we observe again the missing value plot, we will also see that all missing values from os_status and os_months, and also we have fewer missing values for the other variables, it is the case that the individuals that have been removed had many missing covariate values.
-```{r plot na again}
-clinical_data %>%
-  VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
-```
-
-## Distribution of event times
-
-Using the observed times, os_months, we can plot the distribution of times stratifying between censored and events, this will be helpful to understand the dataset, and to check our model in following steps. 
-
-```{r plot time distribution, echo=FALSE}
-clinical_data %>%
-  ggplot(aes(x = os_months,
-             group = os_status,
-             colour = os_status,
-             fill = os_status)) +
-  geom_density(alpha = 0.5)
-```
-
-The KM curve is a non parametric survival estimate, which corresponds to the maximum likelihood solution of the product limit estimate including censored observations:
-
-```{r KM curve, echo = FALSE}
-mle.surv <- survfit(Surv(os_months, os_deceased) ~ 1,
-                    data = clinical_data %>%
-                      mutate(os_deceased = (os_status == "DECEASED")))
-require(ggfortify)
-ggplot2::autoplot(mle.surv, conf.int = F) +
-  ggtitle('KM survival for GGM 2008 Cohort')
-```
+-Use PEM model with TCGA data.
 
 ## Piecewise Exponential Model (PEM)
 
@@ -173,11 +63,11 @@ sfun  <- stepfun(seq(20, 80, by = 20), y0, f = 0)
 plot(sfun,  main = "Step function of PEM", xlab = "time (months)", ylab = "baseline hazard ratio", ylim= c(0, 1.2))
 ```
 We can think of it as first two periods where the hazard rate is higher than in the last two.
-The stan code for the model can be found in:
+The Stan code for the model can be found in:
 
-```{r stan model}
+```{r Stan model}
 stanfile <- "pem_bg.stan"
-#or open stan file
+#or open Stan file
 if (interactive())
   file.edit(stanfile)
 ```
@@ -340,7 +230,7 @@ autoplot(survival::survfit(Surv(os_months, os_deceased) ~ 1,
                       ), conf.int = F) + 
     ggtitle('Simulated KM curve')
 ```
-The next step is to fit the the stan model with the simulated data. But before it is needed to convert the dataset to long format, which will have one observation for each individual and time point. 
+The next step is to fit the the Stan model with the simulated data. But before it is needed to convert the dataset to long format, which will have one observation for each individual and time point. 
 ```{r format long data}
 #order the dataset by observed times
 sim_data <- sim_data %>% 
@@ -359,17 +249,17 @@ longdata <- longdata %>%
     mutate(t = seq(n())) 
 ```
 
-The last step allows for the creation of a time point id for each individual, then in the stan model will be used to assert at which interval belongs the observation, lets have a look at the dataset:
+The last step allows for the creation of a time point id for each individual, then in the Stan model will be used to assert at which interval belongs the observation, lets have a look at the dataset:
 
 ```{r long data}
 View(longdata)
 ```
 
-We can wrap in a function the generation of data for stan which will be handie when running more than one iteration.
+We can wrap in a function the generation of data for Stan which will be handie when running more than one iteration.
 
 ```{r function list data}
 gen_stan_data <- function(data){
-  stan_data <- list(
+  Stan_data <- list(
     N = nrow(data),
     S = dplyr::n_distinct(data$id),
     "T" = dplyr::n_distinct(data$t),
@@ -382,85 +272,131 @@ gen_stan_data <- function(data){
   )
 }
 ```
+It is wise to set initial values before run Stan, even more important in a model that uses a long data format, to improve the convergence rate. We may set the initial values , recall the model:
 
+```{r Stan model}
+stanfile <- "pem_bg.stan"
+#or open Stan file
+if (interactive())
+  file.edit(stanfile)
+```
 
-Now we can run stan:
+We may set the initial values as follows as a function of M the number of covariates used in the model:
+```{r}
+gen_inits <- function(M) {
+  function() 
+  list(
+    beta_bg_raw = rnorm(M),
+    tau_s_bg_raw = 0.1*abs(rnorm(1)),
+    tau_bg_raw = abs(rnorm(M)),
+    c_raw = abs(rnorm(1)),
+    r_raw = abs(rnorm(1)),
+    baseline = rgamma(n = length(diff(tau)), shape = 0.01, scale = 0.1)
+    
+  )
+}
+```
 
+Now we may run Stan:
 
-```{r run stan model , echo=FALSE}
-stanfile <- 'pem_survival_model.stan'
+```{r run Stan model , echo=FALSE}
+#----Run Stan-------#
+nChain <- 2
+stanfile <- 'pem_bg.stan'
 rstan_options(auto_write = TRUE)
 simulated_fit <- stan(stanfile,
-                            data = gen_stan_data(longdata),
-                            iter = 1000,
-                            cores = min(4, parallel::detectCores()),
-                            seed = 7327,
-                            chains = 4
+                      data = gen_stan_data(longdata),
+                      init = gen_inits(M=2),
+                      iter = 1000,
+                      cores = min(nChain, parallel::detectCores()),
+                      seed = 7327,
+                      chains = nChain,
+                      pars = c("beta_bg", "baseline", "lp__")
+                      #control = list(adapt_delta = 0.99)
 )
 ```
 
 ##Convergence review
 
+Using the mentioned seed there were 963 divergent transitions, that is ot encouraging. Let's check the convergence of this model.
+
 ```{r}
 print(simulated_fit)
 ```
+
+Many parameters have a low neff, and more worriesome the Rhat are greater than 1.
 
 ```{r}
 rstan::traceplot(simulated_fit, 'lp__')
 ```
 
 ```{r}
-rstan::traceplot(simulated_fit, 'beta')
+rstan::traceplot(simulated_fit, 'beta_bg')
 ```
 
-We can observe that there are some convergences problems, a first step is to add initial estimates:
-```{r}
 
+The traceplot for the log posterior shows that the model has not explored the posterior distribution fully, although for the beta are weel mixed.
+We can launch shiny Stan to check the diagnostic the model and divergences, an explanation of how to check divergences can be found here. (http://mc-stan.org/users/documentation/case-studies/divergences_and_bias.html).
+```{r}
+if (interactive())
+  shinystan::launch_shinystan(simulated_fit)
 ```
 
 ##Review posterior distribution of parameters
 
+From the output of rstan we can extract the matrix of simulations draws.
 ```{r}
-pp_beta1 <- rstan::extract(simulated_fit,'beta[1]')$beta
-pp_beta2 <- rstan::extract(simulated_fit,'beta[2]')$beta
+pp_beta1 <- rstan::extract(simulated_fit,'beta_bg[1]')$beta_bg
+pp_beta2 <- rstan::extract(simulated_fit,'beta_bg[2]')$beta_bg
+```
 
+We can plot this agains the true known value.
+```{r}
 ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) + 
-    geom_density(aes(x = beta1)) + 
-    geom_vline(aes(xintercept = 10), colour = 'red') +
-    ggtitle('Posterior distribution of beta1\nshowing true value in red')
+  geom_density(aes(x = beta1)) + 
+  geom_vline(aes(xintercept = test_beta[1]), colour = 'red') +
+  ggtitle('Posterior distribution of beta 1\nshowing true value in red')
 ```
 
 
 ```{r}
-
 ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) + 
-    geom_density(aes(x = beta2)) + 
-    geom_vline(aes(xintercept = -3), colour = 'red') +
-    ggtitle('Posterior distribution of beta 2\nshowing true value in red')
+  geom_density(aes(x = beta2)) + 
+  geom_vline(aes(xintercept = test_beta[2]), colour = 'red') +
+  ggtitle('Posterior distribution of beta 2\nshowing true value in red')
 ```
+
+The model has slightly biased estimates for the beta parameters.
 
 ##Posterior predictive checks
 
-
+We can illustrate graphically the posterior predicitve check. First we will need to simulate a new dataframe from our simulated draws.
 ```{r}
-pp_beta <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'beta', permuted = TRUE)$beta) 
+pp_beta_bg <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'beta_bg', permuted = TRUE)$beta_bg) 
 pp_lambda <- as.data.frame.array(rstan::extract(simulated_fit,pars = 'baseline', permuted = TRUE)$baseline)
-
 # create list
-pp_beta <-  split(pp_beta, seq(nrow(pp_beta)))
+pp_beta_bg <-  split(pp_beta_bg, seq(nrow(pp_beta_bg)))
 pp_lambda <-  split(pp_lambda, seq(nrow(pp_lambda)))
-
 pp_newdata <- 
-  purrr::pmap(list(pp_lambda, pp_beta),
-              function(a,b) {pem_sim_data(lambda = a, 
-                                          beta = b,
-                                          tau = tau,
-                                          n = test_n,
-                                          X = X)
-                } )
-
+  purrr::pmap(list(pp_beta_bg, pp_lambda),
+              function(pp_beta, pp_lambda) {pem_sim_data(lambda = pp_lambda, 
+                                           beta = pp_beta,
+                                           tau = tau,
+                                           n = test_n,
+                                           X = X_test)} )
+```
+Check that we have had to use a list of list to use the pmap function from purrr. Now we may plot the posterior predictive distribution of event times:
+```{r}
+ggplot(pp_newdata %>%
+         dplyr::bind_rows() %>%
+         dplyr::mutate(type = 'posterior predicted values') %>%
+         bind_rows(sim_data %>% dplyr::mutate(type = 'actual data'))
+       , aes(x = os_months, group = os_status, colour = os_status, fill = os_status)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~type, ncol = 1)
 ```
 
+These two distributions look similar, we may also want to check the kaplan meier estimates of our posterior predictive draws:
 ```{r}
 ## ----sim-pp-survdata-----------------------------------------------------
 ## cumulative survival rate for each posterior draw
@@ -469,9 +405,6 @@ pp_survdata <-
   purrr::map(~ dplyr::mutate(., os_deceased = os_status == 'DECEASED')) %>%
   purrr::map(~ survival::survfit(Surv(os_months, os_deceased) ~ 1, data = .)) %>%
   purrr::map(fortify)
-```
-
-```{r}
 ## summarize cum survival for each unit time (month), summarized at 95% confidence interval
 pp_survdata_agg <- 
   pp_survdata %>%
@@ -484,26 +417,7 @@ pp_survdata_agg <-
                    , surv_upper = quantile(surv, probs = 0.975)
   ) %>%
   dplyr::ungroup()
-``` 
 
-```{r}
-## summarize cum survival for each unit time (month), summarized at 95% confidence interval
-pp_survdata_agg <- 
-  pp_survdata %>%
-  purrr::map(~ dplyr::mutate(., time_group = floor(time))) %>%
-  dplyr::bind_rows() %>%
-  dplyr::group_by(time_group) %>%
-  dplyr::summarize(surv_mean = mean(surv)
-                   , surv_p50 = median(surv)
-                   , surv_lower = quantile(surv, probs = 0.025)
-                   , surv_upper = quantile(surv, probs = 0.975)
-  ) %>%
-  dplyr::ungroup()
-```
-
-
-```{r }
-## ----sim-plot-ppcheck----------------------------------------------------
 ## km-curve for test data 
 test_data_kmcurve <- 
   fortify(
@@ -520,35 +434,378 @@ ggplot(pp_survdata_agg %>%
          bind_rows(test_data_kmcurve %>% dplyr::mutate(type = 'actual data')),
        aes(x = time, group = type, linetype = type)) + 
   geom_line(aes(y = surv, colour = type)) +
-  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2) +
-  xlim(c(0, 200))
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2) 
+```
+
+The posterior predictive check although not perfect is coherent, we also can check other evaluation crietria for survival prediction such as the Brier score or the AUC.
+
+## Reparameterisation
+
+We have observe that although there are some convergences problems, the inference about our model are coherent. However, we would like to obtain better convergence properties. We can think of other reparameterisations, for example lets take the following correlated unstructured hazard PEM.
+```{r}
+stanfile <- 'pem_bg_up.stan'
+if(interactive())
+    file.edit(stanfile)
+```
+We have reparameterised the baseline parameter in the following manner, now the baseline is correlated and have a normal prior with hyperparameters baseline_mu and baseline sigma. We have applied a rebundant multiplicative reparameterisation  on baseline mu that improves the MCMC convergence, and given to sigma a noninformative uniform prior density.
+Therefore, we need to update our generate inits and generate data function, notice that we are passing the data time duration transformed in log scale, which is irrelevant.
+Note that this model as the whole example is inspired by survivalstan (Jacki Novik) and survival shrinkage repos(Tomi Peltola).
+
+```{r}
+#----Generate stan data----#
+M = length(test_beta)
+gen_stan_data <- function(data){
+  stan_data <- list(
+    N = nrow(data),
+    S = length(unique(longdata$id)),
+    "T" = dplyr::n_distinct(data$t_id),
+    s = array(as.integer(data$id)),
+    log_t_dur = array(log(t_dur), dim = length(t_dur)),
+    M=M,
+    status = as.integer(data$deceased),
+    t = data$t_id,
+    x = array(matrix(c(data$continuos, data$discrete), ncol=M), dim=c(nrow(data), M))
+  )
+}
+#---Set initial values---#
+gen_inits <- function(M) {
+  function() 
+    list(
+      log_baseline_raw = rnorm(n= length(t_dur)),
+      sigma_baseline = runif(1, 0.01, 100),
+      log_baseline_mu = rnorm(1),
+      beta_bg_raw = rnorm(M),
+      tau_s_bg_raw = 0.1*abs(rnorm(1)),
+      tau_bg_raw = abs(rnorm(M))
+    )
+}
+#-----Run Stan-------#
+simulated_fit2 <- stan(stanfile,
+                       data = gen_stan_data(longdata),
+                       init = gen_inits(M=2),
+                       iter = 2000,
+                       cores = min(nChain, parallel::detectCores()),
+                       seed = 7327,
+                       chains = nChain,
+                       control = list(adapt_delta = 0.9),
+                       pars = c("beta_bg", "log_baseline", "lp__")
+)
+```
+Let's check the convergence of the fitted model:
+```{r}
+#----Convergence review -----#
+print(simulated_fit2)
+```
+```{r echo=FALSE}
+rstan::traceplot(simulated_fit2, c('lp__', 'beta_bg'))
+```
+
+The mixing of the chains is improved and the effective sample size has increased for every parameter.
+
+We can see now whether the parameter estimates are biased or not respect to the true value:
+```{r}
+#---Review posterior distribution of beta parameters--#
+pp_beta1 <- rstan::extract(simulated_fit2,'beta_bg[1]')$beta_bg
+pp_beta2 <- rstan::extract(simulated_fit2,'beta_bg[2]')$beta_bg
+ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) + 
+  geom_density(aes(x = beta1)) + 
+  geom_vline(aes(xintercept = test_beta[1]), colour = 'red') +
+  ggtitle('Posterior distribution of beta 1\nshowing true value in red')
+```
+
+```{r}
+ggplot(data.frame(beta1 = pp_beta1, beta2 = pp_beta2)) + 
+  geom_density(aes(x = beta2)) + 
+  geom_vline(aes(xintercept = test_beta[2]), colour = 'red') +
+  ggtitle('Posterior distribution of beta 2\nshowing true value in red')
+```
+We see that they are still biased but they are now improved. Finally lets check the posterior predictive distribution of event and censored times:
+```{r}
+pp_beta_bg <- as.data.frame.array(rstan::extract(simulated_fit2,pars = 'beta_bg', permuted = TRUE)$beta_bg) 
+pp_lambda <- as.data.frame.array(rstan::extract(simulated_fit2,pars = 'log_baseline', permuted = TRUE)$log_baseline)
+pp_lambda <- apply(pp_lambda, 2, exp)
+# create list
+pp_beta_bg <-  split(pp_beta_bg, seq(nrow(pp_beta_bg)))
+pp_lambda <-  split(pp_lambda, seq(nrow(pp_lambda)))
+pp_newdata <- 
+  purrr::pmap(list(pp_beta_bg, pp_lambda),
+              function(pp_beta, pp_lambda) {pem_sim_data(lambda = pp_lambda, 
+                                           beta = pp_beta,
+                                           tau = tau,
+                                           n = test_n,
+                                           X = X_test)} )
+ggplot(pp_newdata %>%
+         dplyr::bind_rows() %>%
+         dplyr::mutate(type = 'posterior predicted values') %>%
+         bind_rows(sim_data %>% dplyr::mutate(type = 'actual data'))
+       , aes(x = os_months, group = os_status, colour = os_status, fill = os_status)) +
+  geom_density(alpha = 0.5) +
+  facet_wrap(~type, ncol = 1)
+
+```
+
+Lastly, the posterior predictive life table estimates:
+```{r}
+## cumulative survival rate for each posterior draw
+pp_survdata <-
+  pp_newdata %>%
+  purrr::map(~ dplyr::mutate(., os_deceased = os_status == 'DECEASED')) %>%
+  purrr::map(~ survival::survfit(Surv(os_months, os_deceased) ~ 1, data = .)) %>%
+  purrr::map(fortify)
+## summarize cum survival for each unit time (month), summarized at 95% confidence interval
+pp_survdata_agg <- 
+  pp_survdata %>%
+  purrr::map(~ dplyr::mutate(., time_group = floor(time))) %>%
+  dplyr::bind_rows() %>%
+  dplyr::group_by(time_group) %>%
+  dplyr::summarize(surv_mean = mean(surv)
+                   , surv_p50 = median(surv)
+                   , surv_lower = quantile(surv, probs = 0.025)
+                   , surv_upper = quantile(surv, probs = 0.975)
+  ) %>%
+  dplyr::ungroup()
+
+## km-curve for test data 
+test_data_kmcurve <- 
+  fortify(
+    survival::survfit(
+      Surv(os_months, os_deceased) ~ 1, 
+      data = sim_data %>% 
+        dplyr::mutate(os_deceased = os_status == 'DECEASED')
+    )) %>%
+  dplyr::mutate(lower = surv, upper = surv)
+
+ggplot(pp_survdata_agg %>%
+         dplyr::mutate(type = 'posterior predicted values') %>%
+         dplyr::rename(surv = surv_p50, lower = surv_lower, upper = surv_upper, time = time_group) %>%
+         bind_rows(test_data_kmcurve %>% dplyr::mutate(type = 'actual data')),
+       aes(x = time, group = type, linetype = type)) + 
+  geom_line(aes(y = surv, colour = type)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2)+xlim(c(0,100)) 
+```
+
+
+```{r}
+#----Wrap as a function----#
+pp_predict_surv <- function(pp_beta, pp_lambda, n, tau, X,
+                            level = 0.9, 
+                            plot = F, data = NULL,
+                            sim_data_fun = pem_sim_data) {
+  pp_newdata <- 
+    purrr::pmap(list(pp_lambda, pp_beta),
+                function(a, b) {pem_sim_data(lambda = a, 
+                                             beta = b,
+                                             tau = tau,
+                                             n = n,
+                                             X = X)} )
+  pp_survdata <-
+    pp_newdata %>%
+    purrr::map(~ dplyr::mutate(., os_deceased = os_status == 'DECEASED')) %>%
+    purrr::map(~ survival::survfit(Surv(os_months, os_deceased) ~ 1, data = .)) %>%
+    purrr::map(fortify)
+  ## compute quantiles given level 
+  lower_p <- 0 + ((1 - level)/2)
+  upper_p <- 1 - ((1 - level)/2)
+  pp_survdata_agg <- 
+    pp_survdata %>%
+    purrr::map(~ dplyr::mutate(.,
+                               time_group = floor(time))) %>%
+    dplyr::bind_rows() %>%
+    dplyr::group_by(time_group) %>%
+    dplyr::summarize(surv_mean = mean(surv)
+                     , surv_p50 = median(surv)
+                     , surv_lower = quantile(surv,
+                                             probs = lower_p)
+                     , surv_upper = quantile(surv,
+                                             probs = upper_p) ) %>%
+    dplyr::ungroup()
+  if (plot == FALSE) {
+    return(pp_survdata_agg)
+  } 
+  ggplot_data <- pp_survdata_agg %>%
+    dplyr::mutate(type = 'posterior predicted values') %>%
+    dplyr::rename(surv = surv_p50,
+                  lower = surv_lower,
+                  upper = surv_upper, time = time_group)
+  if (!is.null(data))
+    ggplot_data <- 
+    ggplot_data %>% 
+    bind_rows(
+      fortify(
+        survival::survfit(
+          Surv(os_months, os_deceased) ~ 1, 
+          data = data %>% 
+            dplyr::mutate(
+              os_deceased = os_status == 'DECEASED') )) %>%
+        dplyr::mutate(lower = surv,
+                      upper = surv, type = 'actual data') )
+  pl <- ggplot(ggplot_data,
+               aes(x = time, group = type, linetype = type)) + 
+    geom_line(aes(y = surv, colour = type)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2)
+  
+  pl 
+}
+```
+
+### Test the model on clinical data
+
+We will use the TCGA dataset to demostrate the survival bayesian model. We use survival models when we have the tiem to event $t_{i}$ for the $ith$ individual with a 0-1 outcome indicate whether the event was observed, usually called "censoring indicator", and a set of covariate values for each individual.
+
+## Download data
+
+To illustrate the PEM model we will use a datset from The Cancer Genome Atlas (TCGA) in  glioblastome. Glioblastome was the first cancer to be extensively studied by TCGA in this paper from 2008. In 2013, the TCGA published a second paper on TCGA including measurments of new biomarkers. This data is available from the cBioPortal and can be downloaded using the cgdsr package, we will also convert directly the dataset to a manipulable dataframe.
+
+```{r download data}
+mycgds = CGDS("http://www.cbioportal.org/public-portal/")
+study_list = getCancerStudies(mycgds)
+id_sutdy = getCancerStudies(mycgds)[56,1]
+case_list = getCaseLists(mycgds, id_sutdy)[2,1]
+clinical_data <-  tbl_df(getClinicalData(mycgds, case_list)) 
+```
+
+We can inspect the dataframe:
+
+```{r inspect dataframe}
+dplyr::glimpse(clinical_data)
+```
+
+## Data Cleaning
+
+First we will obtain a slightly better manipulable dataset. For example, these steps will convert the rownames to a new colunm id_sample, following the tidy dataset canons, the column names into lower case, and the "" into NA.
+
+```{r data cleaning}
+#
+clinical_data <- clinical_data %>% tibble::rownames_to_column("sample_id") 
+names(clinical_data) <- tolower(names(clinical_data)) 
+#convert missig values into NA
+convert_blank_to_na <- function(x) {
+  if(!purrr::is_character(x)){
+    warning('input variate not character - return original')
+    return(x)
+  } else {
+    ifelse(x == '', NA, x)
+  }
+}
+clinical_data <- clinical_data %>%
+  dplyr::mutate_all(funs(convert_blank_to_na))
+```
+
+## Missing survival times
+
+Let's consider the overall survival as the response variable. The variable os_months indicated the observed time to event (in months), while the variable os_status is the censoring indicator.
+Now we can inspect easily the missing data, for example we can plot different combinations of missing values for each covariate using the function aggr form the package VIM.
+
+```{r VIM plot}
+clinical_data %>%
+  VIM::aggr(prop = FALSE, combined = TRUE, numbers = TRUE, sortVars = TRUE, sortCombs = TRUE)
+```
+ 
+
+It is not strange to find in a dataset missing time event values. We could impute them if we have got covariate values for those individuals. On the other hand, covariate values may also be missing for the same individuals. .
+We can plot and obtain a summary of the missing values,using the VIM package and function aggr.
+
+
+## Distribution of event times
+
+Using the observed times, os_months, we can plot the distribution of times stratifying between censored and events, this will be helpful to understand the dataset, and to check our model in following steps. 
+
+```{r plot time distribution, echo=FALSE}
+clinical_data %>%
+  ggplot(aes(x = os_months,
+             group = os_status,
+             colour = os_status,
+             fill = os_status)) +
+  geom_density(alpha = 0.5)
+```
+
+## Data pre-processing
+We will focus on the covariate Karnofsky performance score(KPS), this is a classical covariate that has been replaced recently by genomic predictors but is still used by clinicians. The KPS is given as a categorical covariate, althoug being numeric: 100 means normal life, 80 difficulties and effort for living a normal life while 60 or 40 already means disabled for daily life. In general, the lower the KFS the worst the quality of life. First we notice that there are 49 missing observations.
+```{r}
+pMiss <- function(x){sum(is.na(x))/length(x)*100}
+apply(clinical_data %>% select(karnofsky_performance_score), 2, pMiss)
+```
+This means a 23.7% of our dataset , a general rule of thumb is discard as much as 5% of a dataset. The procedure is to think about what is the mechanism that has produced the missing data. We have to consider if the data is missing (completely) at random  (MAR) or missing not ar random (MNAR). We can visualise (hopefully) whether the missing mechanism is correlated with the censoring. 
+```{r}
+VIM::marginplot(clinical_data[c("os_months","karnofsky_performance_score")])
+```
+
+The plot is not particularly clear, because is design for continuos covariates. However, we can see that there is no patter on the missing covariates neither by strata or by survival months. Thus, the assumption of MAR is teneable.
+We could impute the predictors using Stan, for now we will use the mice package, and we will use a Bayesian polytomous regression model.
+```{r}
+#using imputation by Bayesian poly regression
+tmp <- as.factor(clinical_data$karnofsky_performance_score)
+tmp <- mice::mice.impute.polyreg(y = tmp, 
+                   ry = !is.na(tmp),
+                   x = model.matrix(~ prior_glioma + treatment_status +
+                                      pretreatment_history + os_months,
+                                    data = clinical_data)[,-1],
+                   wy = array(TRUE, dim = length(tmp)))
+clinical_data$karnofsky_performance_score[is.na(clinical_data$karnofsky_performance_score)] <- tmp[is.na(clinical_data$karnofsky_performance_score)]
+remove(tmp)
+```
+Lets make dummy variables with the caret package function:
+```{r}
+#Create dummy vars
+Xdummies <- caret::dummyVars(~ karnofsky_performance_score,
+                             data =  clinical_data %>%
+                               mutate(os_deceased = (os_status == "DECEASED")))
+X <- tbl_df(predict(Xdummies, newdata =  clinical_data %>%
+                      mutate(os_deceased = (os_status == "DECEASED"))))
+```
+We need to think about near zero variance predictors as well, for example they could break our model:
+```{r}
+#Near Zero Variance Predictors
+nzv <- caret::nearZeroVar(X, saveMetrics= TRUE)
+nzv[nzv$nzv,]
+```
+
+We found that the lowest score is very unfrequent in our dataset, because is not good to remove it we could have a look at the KM estimates first:
+```{r}
+mle.surv <- survfit(Surv(os_months, os_deceased) ~ karnofsky_performance_score,
+                    data = clinical_data %>%
+                      mutate(os_deceased = (os_status == "DECEASED")))
+require(ggfortify)
+ggplot2::autoplot(mle.surv, conf.int = F) +
+  ggtitle('KM survival for GGM Cohort')
+```
+
+Although it would be interesting to use a bayesian model, just for now we will use a classical approximation and is to create a new covariate named KPS equal or lower than 60.
+```{r}
+#joint covariates lower than 60
+X <- X %>% mutate(kpsless_or60 = (karnofsky_performance_score.40 | karnofsky_performance_score.60)) %>%
+  rename(kps80 = karnofsky_performance_score.80, kps100 = karnofsky_performance_score.100) %>%
+  select(-karnofsky_performance_score.40, -karnofsky_performance_score.60) %>%
+  mutate_all(funs(as.integer))
+#Double check near Zero Variance Predictors
+nzv <- caret::nearZeroVar(X, saveMetrics= TRUE)
+nzv[nzv$nzv,]
+```
+Create dataset for model building:
+```{r}
+clinical_data <- clinical_data %>%
+  select(sample_id, num_id, os_months, os_status) %>%
+  cbind(X)
+```
+
+
+```{r}
+
+
+The KM curve is a non parametric survival estimate, which corresponds to the maximum likelihood solution of the product limit estimate including censored observations:
+
+```{r KM curve, echo = FALSE}
+mle.surv <- survfit(Surv(os_months, os_deceased) ~ 1,
+                    data = clinical_data %>%
+                      mutate(os_deceased = (os_status == "DECEASED")))
+require(ggfortify)
+ggplot2::autoplot(mle.surv, conf.int = F) +
+  ggtitle('KM survival for GGM 2008 Cohort')
 ```
 
 
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r }
-summary(cars)
-```
-
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
-```
-
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
-
-
-
-
-
-
+We see that there are still divergent transitions and that overall the model still has room for improvement
 
 
 
