@@ -51,7 +51,7 @@ parameters {
   vector<lower=0>[M] tau_bg_raw;
 }
 transformed parameters {
-  vector[N] hazard;
+  vector[N] log_hazard;
   vector[T] log_baseline;
   vector[M] beta_bg;
   real<lower=0> tau_baseline;
@@ -59,17 +59,17 @@ transformed parameters {
   beta_bg = bg_prior_lp(tau_s_bg_raw, tau_bg_raw) .* beta_bg_raw;
   //Hyperprior on hazard
   for (i in 1:T){
-    log_baseline[i] = log_baseline_raw[i] + log_t_dur[i] + log_baseline_mu;
+    log_baseline[i] = log_baseline_raw[i]  + log_baseline_mu;
   } 
   tau_baseline = 1/(sigma_baseline*sigma_baseline);
   //hazard calculation
   for (n in 1:N) {
-    hazard[n] =  exp((x[n,]*beta_bg) + log_baseline[t[n]]);
+    log_hazard[n] =  (x[n,]*beta_bg) + log_baseline[t[n]] + log_t_dur[t[n]];
   }
 }
 model {
   beta_bg_raw ~ normal(0.0, 1.0);
-  status ~ poisson(hazard);
+  status ~ poisson_log(log_hazard);
   //Prior on hazard parameters
   log_baseline_raw[1] ~ normal(0.0, 1.0);
   for (i in 2:T) {

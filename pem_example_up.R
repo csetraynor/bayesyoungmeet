@@ -138,7 +138,7 @@ sim_data <-
   dplyr::mutate(os_deceased = os_status == 'DECEASED') %>%
   rename("continuos" = "1", "discrete" = "2")
 
-autoplot(survival::survfit(Surv(os_months, os_deceased) ~ 1,
+autoplot(survival::survfit(Surv(os_months, os_deceased) ~ discrete,
                            data = sim_data
 ), conf.int = F) + 
   ggtitle('Simulated KM curve')
@@ -329,7 +329,7 @@ gen_inits <- function(M) {
     )
 }
 #-----Run Stan-------#
-nChain <- 2
+nChain <- 1
 stanfile <- 'pem_bg_up.stan'
 rstan_options(auto_write = TRUE)
 test_simulated <- stan(stanfile,
